@@ -33,6 +33,8 @@ When you generate questions:
 - Replacing a question with a different one, use `question set --regenerated`: it takes a new id and counts as not yet seen. Past attempts keep their copy of the old one.
 - `--created-by` is the person you are working for, never yourself.
 
+A new quiz starts closed: nobody can take it officially until someone who edits it opens it (`eidos quizzes set <quiz> --status open`), and they can try it out as practice meanwhile. Leave it closed when you finish writing, and tell the person it is ready to open. `eidos quizzes new --open` is for a person who asks for it open.
+
 ### Courses
 
 ```bash
@@ -59,4 +61,4 @@ A finished session is recorded per person with `eidos quizzes session done <blue
 
 ### Results
 
-`eidos quizzes results <quiz> [--json]` shows what the page would show the person acting: their own attempts and the quiz's totals, or everyone's for the quiz's creator, its results proctors, and the project's owners. That is a soft permission. It decides what is drawn, and the files stay readable, so never call results private. Only people take quizzes: an agent has no attempts and no scores, so never write an attempt.
+`eidos quizzes results <quiz> [--json]` shows what the page would show the person acting: their own attempts and the quiz's totals, or everyone's for the quiz's creator, its proctors, and the project's owners. With no user selected, or in a project with no owner marked, everyone counts as an owner, and a quiz or a course whose creator is unknown is anyone's to manage. That is a soft permission. It decides what is drawn, and the files stay readable, so never call results private. Only people take quizzes: an agent has no attempts and no scores, so never write an attempt.

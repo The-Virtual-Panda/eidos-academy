@@ -69,6 +69,12 @@ export const CSS = `
 .qz-pill { display: inline-flex; align-items: center; gap: 4px; max-width: 280px; height: 22px; padding: 0 8px; overflow: hidden; border: 1px solid var(--color-line-strong); border-radius: 11px; background: none; color: inherit; font-size: var(--text-sm); white-space: nowrap; text-overflow: ellipsis; }
 .qz-pill button { padding: 0; border: 0; background: none; color: var(--color-muted); font: inherit; cursor: pointer; }
 .qz-pill button:hover { color: var(--color-fg); }
+.qz-add { display: inline-flex; align-items: center; min-width: max-content; border-radius: var(--radius-md); color: var(--color-faint); font-size: var(--text-base); cursor: pointer; }
+.qz-add:hover { background: var(--color-hover); color: var(--color-fg); }
+.qz-add [aria-haspopup=listbox] { padding: 1px 6px; border-color: transparent; background: transparent; color: inherit; }
+.qz-add [aria-haspopup=listbox]:hover { border-color: var(--color-line); }
+.qz-help { display: inline-flex; vertical-align: -2px; color: var(--color-faint); cursor: help; }
+.qz-help:hover, .qz-help:focus-visible { color: var(--color-fg); }
 .qz-bars { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; align-items: end; height: 150px; }
 .qz-bar { display: flex; flex-direction: column; justify-content: flex-end; gap: 4px; height: 100%; color: var(--color-muted); font-size: var(--text-sm); text-align: center; }
 .qz-bar i { display: block; min-height: 2px; border-radius: 4px 4px 0 0; background: var(--color-line-strong); }
@@ -136,6 +142,18 @@ export function Stat({ label, value, sub, hero }: { label: string; value: ReactN
       <div className="qz-stat-value">{value}</div>
       {sub !== undefined && <div className="qz-stat-sub">{sub}</div>}
     </div>
+  );
+}
+
+// What a heading means, behind a ? (the design system's HelpMark, which the kit does not hand a plugin yet).
+export function HelpMark({ tip }: { tip: string }): JSX.Element {
+  return (
+    <span className="qz-help" tabIndex={0} role="img" aria-label={tip} data-tip={tip} data-tip-pos="right" data-tip-now="">
+      <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <circle cx="8" cy="8" r="6.5" />
+        <path d="M6.2 6.2a1.9 1.9 0 1 1 2.7 1.7c-.6.3-.9.7-.9 1.3M8 11.6h.01" />
+      </svg>
+    </span>
   );
 }
 

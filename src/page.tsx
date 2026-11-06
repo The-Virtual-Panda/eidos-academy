@@ -30,7 +30,7 @@ import {
   type PagePlugin,
   type PluginHost,
 } from 'eidosmd/page';
-import { asPercent, Delta, Failed, formatDate, LaptopMark, Loading, Stat, Surface, useAct, useData } from './page-kit.tsx';
+import { asPercent, Delta, Failed, formatDate, HelpMark, LaptopMark, Loading, Stat, Surface, useAct, useData } from './page-kit.tsx';
 import type { Attempt, AttemptKind, AttemptMode, Comparison, Course, MyScores, PersonResult, Question, Quiz } from './model.ts';
 
 // ---- what the routes answer ------------------------------------------------------------
@@ -45,6 +45,7 @@ interface Row_ {
   draws_from: string[];
   questions: number;
   created_by: string | null;
+  status: 'open' | 'closed';
   best: number | null;
 }
 interface Overview {
@@ -59,7 +60,7 @@ interface QuizView {
   course: { id: string; title: string } | null;
   place: number | null;
   of: number;
-  may: { edit: boolean; results: boolean; take_official: boolean };
+  may: { edit: boolean; manage: boolean; results: boolean; take_official: boolean; official_why: string | null };
   scores: MyScores;
   practice: { missed: string[]; unseen: string[] };
   whole_quiz: string[];
@@ -198,7 +199,14 @@ function Sidebar(): JSX.Element {
             <span>Courses</span>
           </NavGroup>
           {data.courses.map((course) => entry(course.title, pageHref(host, `course/${Q(course.id)}`), quizzes.filter((row) => row.course === course.id).length))}
-          {entry('One-off quizzes', `${root}?show=oneoff`, quizzes.filter((row) => row.course === null).length)}
+        </>
+      )}
+      {quizzes.some((row) => row.course === null) && (
+        <>
+          <NavGroup>
+            <span>Quizzes</span>
+          </NavGroup>
+          {quizzes.filter((row) => row.course === null).map((row) => entry(row.title, pageHref(host, `quiz/${Q(row.id)}`)))}
         </>
       )}
     </Nav>
@@ -226,7 +234,6 @@ function QuizList({ show }: { show: string | null }): JSX.Element {
     const kept = data.quizzes.filter((row) => {
       if (show === 'mine' && row.created_by !== alias) return false;
       if (show === 'untaken' && row.best !== null) return false;
-      if (show === 'oneoff' && row.course !== null) return false;
       if (course && (course === 'oneoff' ? row.course !== null : row.course !== course)) return false;
       if (creator && row.created_by !== creator) return false;
       const held = `${row.id} ${row.title} ${row.course_title ?? ''} ${row.draws_from.join(' ')} ${row.created_by ?? ''}`.toLowerCase();
@@ -310,6 +317,12 @@ function QuizList({ show }: { show: string | null }): JSX.Element {
                     <button className="qz-rowlink" onClick={() => host.navigate(pageHref(host, `quiz/${Q(row.id)}`))}>
                       {row.title}
                     </button>
+                    {row.status === 'closed' && (
+                      <>
+                        {' '}
+                        <span className="qz-badge">Closed</span>
+                      </>
+                    )}
                   </td>
                   <td>
                     {row.course ? (
@@ -402,16 +415,20 @@ export function NewQuiz({ onClose, courses, draws, course: startCourse }: { onCl
                 </button>
               </span>
             ))}
-            <Select aria-label="Add blueprint" value="" onChange={(event: { target: HTMLSelectElement }) => event.target.value && setSources([...sources, event.target.value])}>
-              <option value="">Add blueprint</option>
-              {(picks?.blueprints ?? [])
-                .filter((held) => !sources.includes(held.id))
-                .map((held) => (
-                  <option key={held.id} value={held.id}>
-                    {held.id} {held.title}
-                  </option>
-                ))}
-            </Select>
+            <span className="qz-add">
+              <Select aria-label="Add blueprint" value="" onChange={(event: { target: HTMLSelectElement }) => event.target.value && setSources([...sources, event.target.value])}>
+                <option value="" hidden>
+                  Add blueprint…
+                </option>
+                {(picks?.blueprints ?? [])
+                  .filter((held) => !sources.includes(held.id))
+                  .map((held) => (
+                    <option key={held.id} value={held.id}>
+                      {held.id} {held.title}
+                    </option>
+                  ))}
+              </Select>
+            </span>
             <Input
               aria-label="Add a link or an asset path"
               placeholder="Add a link or an asset path"
@@ -495,7 +512,7 @@ function LinkPills({ links, editable, onChange, label, picks }: { links: string[
     <>
       {links.map((held) => (
         <span className="qz-pill" key={held}>
-          {held}
+          {picks?.groups.includes(held) ? `${held}/*` : held}
           {editable && (
             <button aria-label={`Remove ${held}`} onClick={() => onChange(links.filter((link) => link !== held))}>
               ×
@@ -505,23 +522,27 @@ function LinkPills({ links, editable, onChange, label, picks }: { links: string[
       ))}
       {links.length === 0 && !editable && <Text tone="faint">None</Text>}
       {editable && (
-        <Select aria-label={label} value="" onChange={(event: { target: HTMLSelectElement }) => event.target.value && onChange([...links, event.target.value])}>
-          <option value="">{label}</option>
-          {(picks?.groups ?? [])
-            .filter((held) => !links.includes(held))
-            .map((held) => (
-              <option key={held} value={held}>
-                {held}
-              </option>
-            ))}
-          {(picks?.blueprints ?? [])
-            .filter((held) => !links.includes(held.id))
-            .map((held) => (
-              <option key={held.id} value={held.id}>
-                {held.id} {held.title}
-              </option>
-            ))}
-        </Select>
+        <span className="qz-add">
+          <Select aria-label={label} value="" onChange={(event: { target: HTMLSelectElement }) => event.target.value && onChange([...links, event.target.value])}>
+            <option value="" hidden>
+              {label}
+            </option>
+            {(picks?.groups ?? [])
+              .filter((held) => !links.includes(held))
+              .map((held) => (
+                <option key={held} value={held}>
+                  {held}/*
+                </option>
+              ))}
+            {(picks?.blueprints ?? [])
+              .filter((held) => !links.includes(held.id))
+              .map((held) => (
+                <option key={held.id} value={held.id}>
+                  {held.id} {held.title}
+                </option>
+              ))}
+          </Select>
+        </span>
       )}
     </>
   );
@@ -584,11 +605,11 @@ function CoursePage({ id }: { id: string }): JSX.Element {
           <dl className="qz-props">
             <dt>Content</dt>
             <dd>
-              <LinkPills links={course.content} editable={data.may.edit} label="Add content" picks={picks} onChange={(content) => patch({ content })} />
+              <LinkPills links={course.content} editable={data.may.edit} label="Add content…" picks={picks} onChange={(content) => patch({ content })} />
             </dd>
             <dt>Study plan</dt>
             <dd>
-              <LinkPills links={course.study_plan} editable={data.may.edit} label="Link a study plan" picks={picks} onChange={(study_plan) => patch({ study_plan })} />
+              <LinkPills links={course.study_plan} editable={data.may.edit} label="Add study plan…" picks={picks} onChange={(study_plan) => patch({ study_plan })} />
               {course.study_plan.length === 0 && data.may.edit && (
                 <Ask
                   label="Build a study plan"
@@ -629,9 +650,13 @@ function CoursePage({ id }: { id: string }): JSX.Element {
                 </span>
               </span>
               <span className="qz-badge">{row.best === null ? 'Not yet' : `Best ${asPercent(row.best)}`}</span>
-              <Link className={`qz-btn${row.best === null ? '' : ' secondary'}`} to={pageHref(host, `quiz/${Q(row.id)}`)}>
-                {row.best === null ? 'Take' : 'Retake'}
-              </Link>
+              {row.status === 'closed' ? (
+                <span className="qz-badge">Closed</span>
+              ) : (
+                <Link className={`qz-btn${row.best === null ? '' : ' secondary'}`} to={pageHref(host, `quiz/${Q(row.id)}`)}>
+                  {row.best === null ? 'Take' : 'Retake'}
+                </Link>
+              )}
             </div>
           ))}
           <p className="qz-muted qz-small">The order suggests a path. Anyone can take any quiz at any time.</p>
@@ -761,6 +786,8 @@ function MyScoresTab({ view }: { view: QuizView }): JSX.Element {
       )}
       {askable === 0 ? (
         <Empty>This quiz has no questions yet.</Empty>
+      ) : quiz.status === 'closed' && !view.may.edit ? (
+        <Empty>This quiz is closed. You can take it once it opens.</Empty>
       ) : (
         <div className="qz-grid">
           <div className="qz-card">
@@ -772,12 +799,12 @@ function MyScoresTab({ view }: { view: QuizView }): JSX.Element {
               The whole quiz. Your score is committed and kept in your history.
             </div>
             <div className="qz-actions">
-              {view.may.take_official ? (
+              {view.may.take_official && quiz.status === 'open' ? (
                 <Link className="qz-btn" to={take('official', 'whole')}>
                   Take officially
                 </Link>
               ) : (
-                <button className="qz-btn" disabled title="Only people take quizzes">
+                <button className="qz-btn" disabled title={quiz.status === 'closed' ? 'Open this quiz to take it officially' : (view.may.official_why ?? undefined)}>
                   Take officially
                 </button>
               )}
@@ -791,7 +818,7 @@ function MyScoresTab({ view }: { view: QuizView }): JSX.Element {
               </span>
             </div>
             <div className="qz-muted qz-small" style={{ marginTop: 4 }}>
-              Stays on this machine. Never committed, never counted.
+              {quiz.status === 'closed' ? 'Try it out while it is closed. Stays on this machine.' : 'Stays on this machine. Never committed, never counted.'}
             </div>
             <div className="qz-actions">
               <Link className="qz-btn secondary" to={take('practice', 'whole')}>
@@ -912,7 +939,7 @@ function CompareTab({ id }: { id: string }): JSX.Element {
         </div>
       </div>
       <p className="qz-muted qz-small" style={{ marginTop: 10 }}>
-        Totals only. Other people's names, scores, and answers stay with the quiz's creator and results proctors.
+        Totals only. Other people's names, scores, and answers stay with the quiz's creator and proctors.
       </p>
     </>
   );
@@ -1085,7 +1112,7 @@ function Builder({ view, generate, reload }: { view: QuizView; generate: string 
       </Row>
       {generate && quiz.questions.length === 0 && (
         <div style={{ marginTop: 12 }}>
-          <Notice>Press Generate questions to have your agent write them in Chat. They appear here as it adds them.</Notice>
+          <Notice>Press Generate questions to have your agent write them in Chat. They appear here as it adds them. The quiz stays closed until you open it.</Notice>
         </div>
       )}
       {mode === 'source' ? (
@@ -1292,7 +1319,7 @@ function QuizPage({ id, tab, generate }: { id: string; tab: string; generate: st
             <h1 className="qz-h1" style={{ flex: '1 1 400px' }}>
               {quiz.title}
             </h1>
-            {may.edit && (
+            {may.manage && (
               <Button size="sm" variant="quiet" onClick={remove}>
                 Delete
               </Button>
@@ -1314,19 +1341,33 @@ function QuizPage({ id, tab, generate }: { id: string; tab: string; generate: st
                 </dd>
               </>
             )}
+            <dt>Status</dt>
+            <dd>
+              <span className={`qz-badge${quiz.status === 'open' ? ' good' : ''}`}>{quiz.status === 'open' ? 'Open' : 'Closed'}</span>
+              {may.edit && (
+                <Button
+                  size="sm"
+                  disabled={quiz.status === 'closed' && data.askable === 0}
+                  title={quiz.status === 'closed' && data.askable === 0 ? 'Add a question first' : undefined}
+                  onClick={() => patch({ status: quiz.status === 'open' ? 'closed' : 'open' })}
+                >
+                  {quiz.status === 'open' ? 'Close quiz' : 'Open quiz'}
+                </Button>
+              )}
+            </dd>
             <dt>Draws from</dt>
             <dd>
               <LinkPills
                 links={quiz.draws_from}
                 editable={may.edit}
-                label="Add content"
+                label="Add content…"
                 picks={picks ? { blueprints: picks.blueprints, groups: [] } : null}
                 onChange={(draws_from) => patch({ draws_from })}
               />
             </dd>
             <dt>Created by</dt>
             <dd>
-              {may.edit ? (
+              {may.manage ? (
                 <Select aria-label="Created by" value={quiz.created_by ?? ''} onChange={(event: { target: HTMLSelectElement }) => patch({ created_by: event.target.value || null })}>
                   {quiz.created_by === null && <option value="">Unknown</option>}
                   {data.people.map((person) => (
@@ -1343,34 +1384,36 @@ function QuizPage({ id, tab, generate }: { id: string; tab: string; generate: st
             </dd>
             {may.results && (
               <>
-                <dt>Results proctors</dt>
+                <dt>
+                  Proctors <HelpMark tip="Can edit the quiz and see all test results" />
+                </dt>
                 <dd>
-                  {quiz.results_proctors.map((alias) => (
+                  {quiz.proctors.map((alias) => (
                     <span className="qz-pill" key={alias}>
                       @{alias}
-                      {may.edit && (
-                        <button aria-label={`Remove @${alias}`} onClick={() => patch({ results_proctors: quiz.results_proctors.filter((held) => held !== alias) })}>
+                      {may.manage && (
+                        <button aria-label={`Remove @${alias}`} onClick={() => patch({ proctors: quiz.proctors.filter((held) => held !== alias) })}>
                           ×
                         </button>
                       )}
                     </span>
                   ))}
-                  {!may.edit && quiz.results_proctors.length === 0 && <Text tone="faint">None</Text>}
-                  {may.edit && (
-                    <Select
-                      aria-label="Add proctor"
-                      value=""
-                      onChange={(event: { target: HTMLSelectElement }) => event.target.value && patch({ results_proctors: [...quiz.results_proctors, event.target.value] })}
-                    >
-                      <option value="">Add proctor</option>
-                      {data.people
-                        .filter((person) => person.alias !== quiz.created_by && !quiz.results_proctors.includes(person.alias))
-                        .map((person) => (
-                          <option key={person.alias} value={person.alias}>
-                            {person.name} (@{person.alias})
-                          </option>
-                        ))}
-                    </Select>
+                  {!may.manage && quiz.proctors.length === 0 && <Text tone="faint">None</Text>}
+                  {may.manage && (
+                    <span className="qz-add">
+                      <Select aria-label="Add proctor" value="" onChange={(event: { target: HTMLSelectElement }) => event.target.value && patch({ proctors: [...quiz.proctors, event.target.value] })}>
+                        <option value="" hidden>
+                          Add proctor…
+                        </option>
+                        {data.people
+                          .filter((person) => person.alias !== quiz.created_by && !quiz.proctors.includes(person.alias))
+                          .map((person) => (
+                            <option key={person.alias} value={person.alias}>
+                              {person.name} (@{person.alias})
+                            </option>
+                          ))}
+                      </Select>
+                    </span>
                   )}
                 </dd>
               </>
@@ -1432,6 +1475,23 @@ function Take({ id, kind, mode }: { id: string; kind: AttemptKind; mode: Attempt
   if (error) return <Failed message={error} />;
   if (!data || !items) return <Loading />;
   const back = pageHref(host, `quiz/${Q(id)}`);
+
+  if (data.quiz.status === 'closed' && !finished && (kind === 'official' || !data.may.edit)) {
+    return (
+      <Surface>
+        <Page>
+          <div className="qz">
+            <Empty>This quiz is closed. You can take it once it opens.</Empty>
+            <div className="qz-actions">
+              <Link className="qz-btn" to={back}>
+                Back to quiz
+              </Link>
+            </div>
+          </div>
+        </Page>
+      </Surface>
+    );
+  }
 
   if (items.length === 0) {
     return (
@@ -1606,9 +1666,13 @@ function BesideBlueprint(): JSX.Element {
                 {row.best === null ? 'Not yet taken' : `Your best ${asPercent(row.best)}`}. {row.questions} questions.
               </div>
               <div style={{ marginTop: 8 }}>
-                <Button size="sm" variant="primary" onClick={() => host.navigate(pageHref(host, `quiz/${Q(row.id)}`))}>
-                  {row.best === null ? 'Take' : 'Retake'}
-                </Button>
+                {row.status === 'closed' ? (
+                  <span className="qz-badge">Closed</span>
+                ) : (
+                  <Button size="sm" variant="primary" onClick={() => host.navigate(pageHref(host, `quiz/${Q(row.id)}`))}>
+                    {row.best === null ? 'Take' : 'Retake'}
+                  </Button>
+                )}
               </div>
             </div>
           ))}

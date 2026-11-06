@@ -6,9 +6,27 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, s
 import path from 'node:path';
 import { HostError, type Host } from 'eidosmd/plugin';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
-import { drawId, parseAttempt, parseCourse, parseQuiz, renderAttempt, renderCourse, renderQuiz, slugify, type Attempt, type Course, type Person, type Question, type Quiz } from './model.ts';
+import {
+  accessOf,
+  drawId,
+  parseAttempt,
+  parseCourse,
+  parseQuiz,
+  renderAttempt,
+  renderCourse,
+  renderQuiz,
+  slugify,
+  type Attempt,
+  type Course,
+  type Person,
+  type Question,
+  type Quiz,
+  type QuizStatus,
+} from './model.ts';
 
 export const COURSE_FILE = 'course.md';
+// who a practice attempt is by while no user is selected
+export const LOCAL_PERSON = 'local';
 
 export interface ProjectPerson extends Person {
   name: string;
@@ -160,6 +178,22 @@ export class Store {
     return people.find((person) => (identity.email !== null && person.email === identity.email) || person.name === identity.name) ?? null;
   }
 
+  // Who someone counts as for what the page shows and who may change a thing (Quizzes REQ23).
+  access(): Person {
+    return accessOf(
+      this.me(),
+      this.people().some((person) => person.owner),
+    );
+  }
+
+  // Why this person can't sign an official attempt, or null when they can.
+  cannotSign(): string | null {
+    const me = this.me();
+    if (me?.agent) return 'Only people take quizzes';
+    if (me?.alias || this.gitIdentity()) return null;
+    return 'An official attempt needs a name: pick who you are in the project, or set your git name';
+  }
+
   // Who signs an official attempt: the person acting, added to the project's users the
   // first time they need to be (Quizzes REQ18).
   signer(): ProjectPerson {
@@ -169,10 +203,17 @@ export class Store {
       if (me.alias) return me;
     }
     const identity = this.gitIdentity();
-    if (!identity) throw new HostError(400, 'Eidos does not know who you are yet: add yourself with eidos users add, or set your git name');
+    if (!identity) throw new HostError(400, 'an official attempt needs a name: pick who you are in the project, or set your git name');
     const { user } = this.host.addPerson({ name: identity.name, email: identity.email });
     if (!user.alias) throw new HostError(400, `${user.name} has no alias to sign an attempt with; give them one in the project's users`);
     return { name: user.name, alias: user.alias, owner: user.owner === true, agent: false };
+  }
+
+  // Whose a practice attempt is. It stays on this machine, so it needs no name to be kept.
+  practiceBy(): string {
+    const me = this.me();
+    if (me?.agent) throw new HostError(403, 'only people take quizzes, so an agent has no attempts');
+    return me?.alias ?? LOCAL_PERSON;
   }
 
   // ---- writing quizzes and courses ---------------------------------------------
@@ -200,7 +241,7 @@ export class Store {
     return Math.max(0, ...quizzes.map((quiz) => quiz.rank)) + 1;
   }
 
-  async createQuiz(input: { title: string; draws_from?: string[]; course?: string | null; created_by?: string | null; rank?: number | null }): Promise<Quiz> {
+  async createQuiz(input: { status?: QuizStatus; title: string; draws_from?: string[]; course?: string | null; created_by?: string | null; rank?: number | null }): Promise<Quiz> {
     const title = input.title.trim();
     if (!title) throw new HostError(400, 'a quiz needs a title');
     const listed = this.list();
@@ -213,7 +254,8 @@ export class Store {
       title,
       draws_from: input.draws_from ?? [],
       created_by: input.created_by === undefined ? (this.me()?.alias ?? null) : input.created_by,
-      results_proctors: [],
+      proctors: [],
+      status: input.status ?? 'closed',
       rank: this.nextRank(course),
       course,
       questions: [],

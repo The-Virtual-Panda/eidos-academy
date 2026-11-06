@@ -1,14 +1,15 @@
 // The pure work: a quiz's file reads back as it was written, and every sum a page shows.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { canEdit, canSeeResults, compare, everyone, makeAttempt, myScores, parseQuestions, parseQuiz, practiceSets, renderQuiz, type Attempt, type Quiz } from '../src/model.ts';
+import { accessOf, canEdit, canManage, canSeeResults, compare, everyone, makeAttempt, myScores, parseQuestions, parseQuiz, practiceSets, renderQuiz, type Attempt, type Quiz } from '../src/model.ts';
 
 const quiz: Quiz = {
   id: 'Q-AAAA',
   title: 'A quiz',
   draws_from: ['B-1', 'https://example.com'],
   created_by: 'ada',
-  results_proctors: ['bo'],
+  proctors: ['bo'],
+  status: 'closed',
   rank: 2,
   course: null,
   path: 'quizzes/a-quiz.md',
@@ -96,8 +97,29 @@ test('everyone lists each person with their attempts, newest taken first', () =>
   assert.equal(people[0]!.best, 0.8);
 });
 
-test('results go to the creator, proctors, and owners; editing to the creator and owners', () => {
-  const held = { created_by: 'ada', results_proctors: ['bo'] };
+test('no user selected, or no owner marked, is full access', () => {
+  const held = { created_by: 'ada', proctors: [] };
+  const none = accessOf(null, true);
+  assert.ok(canSeeResults(held, none));
+  assert.ok(canEdit(held, none));
+  const noOwners = accessOf({ alias: 'cy', owner: false }, false);
+  assert.ok(canSeeResults(held, noOwners));
+  assert.ok(canEdit(held, noOwners));
+  const withOwners = accessOf({ alias: 'cy', owner: false }, true);
+  assert.ok(!canSeeResults(held, withOwners));
+  assert.ok(!canEdit(held, withOwners));
+});
+
+test("a quiz or a course with no known creator is anyone's to manage", () => {
+  const held = { created_by: null, proctors: [] };
+  const person = { alias: 'cy', owner: false };
+  assert.ok(canSeeResults(held, person));
+  assert.ok(canEdit(held, person));
+  assert.ok(canEdit({ created_by: null }, person));
+});
+
+test('results go to the creator, proctors, and owners; editing to them too, and who holds it to the creator and owners', () => {
+  const held = { created_by: 'ada', proctors: ['bo'] };
   assert.ok(canSeeResults(held, { alias: 'ada', owner: false }));
   assert.ok(canSeeResults(held, { alias: 'bo', owner: false }));
   assert.ok(canSeeResults(held, { alias: 'own', owner: true }));
@@ -105,5 +127,8 @@ test('results go to the creator, proctors, and owners; editing to the creator an
   assert.ok(!canSeeResults(held, null));
   assert.ok(canEdit(held, { alias: 'ada', owner: false }));
   assert.ok(canEdit(held, { alias: 'own', owner: true }));
-  assert.ok(!canEdit(held, { alias: 'bo', owner: false }), 'a results proctor changes nothing');
+  assert.ok(canEdit(held, { alias: 'bo', owner: false }), 'a proctor edits the quiz');
+  assert.ok(!canManage(held, { alias: 'bo', owner: false }), 'a proctor does not change who holds it');
+  assert.ok(canManage(held, { alias: 'ada', owner: false }));
+  assert.ok(!canEdit(held, { alias: 'cy', owner: false }));
 });

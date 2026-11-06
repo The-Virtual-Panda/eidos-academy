@@ -14,13 +14,17 @@ export interface Question {
   reference: string;
 }
 
+export type QuizStatus = 'open' | 'closed';
+
 export interface Quiz {
   id: string;
   title: string;
   // blueprint ids, asset paths, and links
   draws_from: string[];
   created_by: string | null;
-  results_proctors: string[];
+  proctors: string[];
+  // closed, nobody can take it: a quiz starts closed and opens when it is ready
+  status: QuizStatus;
   // its place in its course
   rank: number;
   // the course's id, from the folder it sits in; null for a one-off
@@ -204,7 +208,8 @@ export function parseQuiz(source: string, path: string, course: string | null): 
     title: text(data['title']).trim() || 'Untitled quiz',
     draws_from: strings(data['draws_from']),
     created_by: text(data['created_by']).trim() || null,
-    results_proctors: strings(data['results_proctors']),
+    proctors: strings(data['proctors']),
+    status: data['status'] === 'closed' ? 'closed' : 'open',
     rank: typeof data['rank'] === 'number' ? data['rank'] : Number.MAX_SAFE_INTEGER,
     course,
     questions: parseQuestions(body),
@@ -219,7 +224,8 @@ export function renderQuiz(quiz: Quiz): string {
       title: quiz.title,
       draws_from: quiz.draws_from,
       created_by: quiz.created_by,
-      results_proctors: quiz.results_proctors,
+      proctors: quiz.proctors,
+      status: quiz.status,
       rank: quiz.rank === Number.MAX_SAFE_INTEGER ? null : quiz.rank,
     },
     renderQuestions(quiz.questions),
@@ -429,13 +435,29 @@ export interface Person {
   owner: boolean;
 }
 
-export function canSeeResults(quiz: Pick<Quiz, 'created_by' | 'results_proctors'>, person: Person | null): boolean {
-  if (!person) return false;
-  if (person.owner) return true;
-  return person.alias !== null && (person.alias === quiz.created_by || quiz.results_proctors.includes(person.alias));
+// Who someone counts as for those two questions. No user selected is full facilitation, as a
+// blank me.md is, and a project that marks no owner leaves everyone one, as a project that marks
+// no editor leaves everyone an editor.
+export function accessOf(me: Person | null, someoneIsOwner: boolean): Person {
+  if (!me) return { alias: null, owner: true };
+  return someoneIsOwner ? me : { alias: me.alias, owner: true };
 }
 
-export function canEdit(thing: { created_by: string | null }, person: Person | null): boolean {
+export function canSeeResults(quiz: Pick<Quiz, 'created_by' | 'proctors'>, person: Person | null): boolean {
   if (!person) return false;
-  return person.owner || (person.alias !== null && person.alias === thing.created_by);
+  // made while nobody was known, it has no creator to keep it from anyone
+  if (person.owner || quiz.created_by === null) return true;
+  return person.alias !== null && (person.alias === quiz.created_by || quiz.proctors.includes(person.alias));
+}
+
+// Change the quiz: its questions, its title, what it draws from, and its course.
+export function canEdit(thing: { created_by: string | null; proctors?: string[] }, person: Person | null): boolean {
+  if (canManage(thing, person)) return true;
+  return person !== null && person.alias !== null && (thing.proctors ?? []).includes(person.alias);
+}
+
+// Change who holds it: its proctors and its creator, and delete it.
+export function canManage(thing: { created_by: string | null }, person: Person | null): boolean {
+  if (!person) return false;
+  return person.owner || thing.created_by === null || (person.alias !== null && person.alias === thing.created_by);
 }

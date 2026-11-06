@@ -3,9 +3,10 @@
 Build multiple-choice quizzes on your project's content, take them locally to practice or officially for the record, and keep every score over time. A plugin for [Eidos MD](https://eidosmd.com) from The Virtual Panda.
 
 - **Build a quiz** from any blueprint, asset, or link. Your own AI agent generates the questions, you regenerate the ones you don't like, or you write them yourself. Each question has its answer and the reason why.
+- **Open it when it's ready.** A new quiz starts closed, and you can try it out before opening it to everyone.
 - **Group quizzes into courses**, in order, or keep a quiz as a one-off.
 - **Practice locally, then take it officially.** Practice stays on your machine. An official attempt is committed with the project and kept in your history.
-- **See your scores over time**, and how you compare with the quiz's average. The quiz's creator, the results proctors they add, and the project's owners see everyone's results, down to each answer.
+- **See your scores over time**, and how you compare with the quiz's average. The quiz's creator, the proctors they add, and the project's owners see everyone's results, down to each answer.
 - **Add a study plan if you want one.** `/study-plan` has your agent write reading sessions for a book, a textbook, or online content, as ordinary blueprints in your project.
 
 Scoring runs on good faith. What each person is shown is a soft permission, not security: the answer key and committed results are files anyone with the project can read.

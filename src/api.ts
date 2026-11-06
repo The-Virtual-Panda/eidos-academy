@@ -4,6 +4,7 @@ import { HostError, type Host } from 'eidosmd/plugin';
 import {
   askable,
   canEdit,
+  canManage,
   parseQuiz,
   renderQuiz,
   canSeeResults,
@@ -20,8 +21,9 @@ import {
   type Course,
   type Question,
   type Quiz,
+  type QuizStatus,
 } from './model.ts';
-import { Store, type ProjectPerson } from './store.ts';
+import { LOCAL_PERSON, Store, type ProjectPerson } from './store.ts';
 
 export interface QuizRow {
   id: string;
@@ -33,6 +35,7 @@ export interface QuizRow {
   draws_from: string[];
   questions: number;
   created_by: string | null;
+  status: QuizStatus;
   best: number | null;
 }
 
@@ -43,7 +46,7 @@ export function makeApi(host: Host) {
 
   const myAttempts = (quiz: string, alias: string | null): Attempt[] => {
     const official = alias ? store.officialAttempts(quiz).filter((attempt) => attempt.by === alias) : [];
-    const practice = store.practiceAttempts(quiz).filter((attempt) => alias === null || attempt.by === alias);
+    const practice = store.practiceAttempts(quiz).filter((attempt) => alias === null || attempt.by === alias || attempt.by === LOCAL_PERSON);
     return [...official, ...practice];
   };
 
@@ -58,7 +61,12 @@ export function makeApi(host: Host) {
     const me = store.me();
     const official = store.officialAttempts();
     const seen = new Map<string, number>();
-    const inOrder = [...quizzes].sort((a, b) => (courses.find((course) => course.id === a.course)?.title ?? '\uffff').localeCompare(courses.find((course) => course.id === b.course)?.title ?? '\uffff') || a.rank - b.rank || a.title.localeCompare(b.title));
+    const inOrder = [...quizzes].sort(
+      (a, b) =>
+        (courses.find((course) => course.id === a.course)?.title ?? '\uffff').localeCompare(courses.find((course) => course.id === b.course)?.title ?? '\uffff') ||
+        a.rank - b.rank ||
+        a.title.localeCompare(b.title),
+    );
     return inOrder.map((quiz) => {
       const place = quiz.course ? (seen.get(quiz.course) ?? 0) + 1 : null;
       if (quiz.course && place) seen.set(quiz.course, place);
@@ -69,6 +77,7 @@ export function makeApi(host: Host) {
         course: quiz.course,
         course_title: courses.find((course) => course.id === quiz.course)?.title ?? null,
         place,
+        status: quiz.status,
         draws_from: quiz.draws_from,
         questions: askable(quiz).length,
         created_by: quiz.created_by,
@@ -78,7 +87,7 @@ export function makeApi(host: Host) {
   };
 
   const requireEdit = (thing: { created_by: string | null }, what: string): void => {
-    if (!canEdit(thing, store.me())) throw new HostError(403, `only ${what}'s creator and the project's owners change it`);
+    if (!canEdit(thing, store.access())) throw new HostError(403, `only ${what}'s creator, its proctors, and the project's owners change it`);
   };
 
   const validated = (question: Question): Question => {
@@ -120,7 +129,13 @@ export function makeApi(host: Host) {
         course: course ? { id: course.id, title: course.title } : null,
         place: quiz.course ? inCourse.findIndex((held) => held.id === quiz.id) + 1 : null,
         of: inCourse.length,
-        may: { edit: canEdit(quiz, me), results: canSeeResults(quiz, me), take_official: !me?.agent },
+        may: {
+          edit: canEdit(quiz, store.access()),
+          manage: canManage(quiz, store.access()),
+          results: canSeeResults(quiz, store.access()),
+          take_official: store.cannotSign() === null,
+          official_why: store.cannotSign(),
+        },
         scores: myScores(mine),
         practice: practiceSets(quiz, mine),
         whole_quiz: askable(quiz).map((question) => question.id),
@@ -138,7 +153,7 @@ export function makeApi(host: Host) {
 
     results(id: string) {
       const quiz = store.quiz(id);
-      if (!canSeeResults(quiz, store.me())) throw new HostError(403, "a quiz's results are shown to its creator, its results proctors, and the project's owners");
+      if (!canSeeResults(quiz, store.access())) throw new HostError(403, "a quiz's results are shown to its creator, its proctors, and the project's owners");
       const official = store.officialAttempts(quiz.id);
       const names = new Map(store.people().map((person) => [person.alias, person.name]));
       const people = everyone(official).map((person) => ({ ...person, name: names.get(person.alias) ?? person.alias }));
@@ -151,7 +166,7 @@ export function makeApi(host: Host) {
       const me = store.me();
       const own = myAttempts(quiz.id, me?.alias ?? null).find((attempt) => attempt.id === attemptId);
       if (own) return own;
-      if (!canSeeResults(quiz, me)) throw new HostError(403, "another person's answers are shown to the quiz's creator, its results proctors, and the project's owners");
+      if (!canSeeResults(quiz, store.access())) throw new HostError(403, "another person's answers are shown to the quiz's creator, its proctors, and the project's owners");
       const found = store.officialAttempts(quiz.id).find((attempt) => attempt.id === attemptId);
       if (!found) throw new HostError(404, `no attempt ${attemptId} on this quiz`);
       return found;
@@ -161,18 +176,20 @@ export function makeApi(host: Host) {
       const quiz = store.quiz(input.quiz);
       if (input.kind !== 'official' && input.kind !== 'practice') throw new HostError(400, 'an attempt is official or practice');
       if (input.kind === 'official' && input.mode !== 'whole') throw new HostError(400, 'an official attempt takes the whole quiz');
-      const person = store.signer();
-      const earlier = store.officialAttempts(quiz.id).filter((attempt) => attempt.by === person.alias);
+      // closed, a quiz takes no official attempts, and only those who edit it may try it out
+      if (quiz.status === 'closed' && (input.kind === 'official' || !canEdit(quiz, store.access()))) throw new HostError(409, 'this quiz is closed');
+      const by = input.kind === 'official' ? store.signer().alias! : store.practiceBy();
+      const earlier = store.officialAttempts(quiz.id).filter((attempt) => attempt.by === by);
       let attempt: Attempt;
       try {
-        attempt = makeAttempt({ id: store.newAttemptId(), quiz, kind: input.kind, mode: input.mode, by: person.alias!, completedAt: new Date().toISOString(), answers: input.answers });
+        attempt = makeAttempt({ id: store.newAttemptId(), quiz, kind: input.kind, mode: input.mode, by, completedAt: new Date().toISOString(), answers: input.answers });
       } catch (cause) {
         throw new HostError(409, cause instanceof Error ? cause.message : String(cause));
       }
       await store.saveAttempt(attempt);
       const fraction = percent(attempt);
       const last = earlier.sort((a, b) => a.completed_at.localeCompare(b.completed_at)).at(-1);
-      const mine = myAttempts(quiz.id, person.alias);
+      const mine = myAttempts(quiz.id, by);
       return {
         attempt,
         percent: fraction,
@@ -192,18 +209,22 @@ export function makeApi(host: Host) {
       return store.createQuiz({ title: input.title, draws_from: input.draws_from ?? [], course: input.course ?? null, rank: input.place ?? null });
     },
 
-    async updateQuiz(id: string, patch: { title?: string; draws_from?: string[]; results_proctors?: string[]; created_by?: string | null; course?: string | null }) {
+    async updateQuiz(id: string, patch: { title?: string; draws_from?: string[]; proctors?: string[]; created_by?: string | null; course?: string | null; status?: QuizStatus }) {
       let quiz = store.quiz(id);
       requireEdit(quiz, 'a quiz');
+      if (patch.status === 'open' && askable(quiz).length === 0) throw new HostError(400, 'add a question before opening this quiz');
+      if ((patch.proctors !== undefined || patch.created_by !== undefined) && !canManage(quiz, store.access()))
+        throw new HostError(403, "only a quiz's creator and the project's owners change who holds it");
       if (patch.course !== undefined) {
         if (patch.course) requireEdit(store.course(patch.course), 'a course');
         quiz = await store.moveQuiz(quiz.id, patch.course);
       }
       const next: Quiz = {
         ...quiz,
+        ...(patch.status ? { status: patch.status } : {}),
         ...(patch.title !== undefined ? { title: patch.title.trim() || quiz.title } : {}),
         ...(patch.draws_from ? { draws_from: patch.draws_from } : {}),
-        ...(patch.results_proctors ? { results_proctors: patch.results_proctors } : {}),
+        ...(patch.proctors ? { proctors: patch.proctors } : {}),
         ...(patch.created_by !== undefined ? { created_by: patch.created_by } : {}),
       };
       await store.saveQuiz(next);
@@ -240,7 +261,7 @@ export function makeApi(host: Host) {
     // The file as a person edits it in Source, which may reshape anything but what makes it this quiz.
     quizSource(id: string) {
       const quiz = store.quiz(id);
-      if (!canEdit(quiz, store.me())) throw new HostError(403, "only a quiz's creator and the project's owners change it");
+      if (!canEdit(quiz, store.access())) throw new HostError(403, "only a quiz's creator, its proctors, and the project's owners change it");
       return { text: renderQuiz(quiz) };
     },
 
@@ -259,7 +280,7 @@ export function makeApi(host: Host) {
     },
 
     async removeQuiz(id: string) {
-      requireEdit(store.quiz(id), 'a quiz');
+      if (!canManage(store.quiz(id), store.access())) throw new HostError(403, "only a quiz's creator and the project's owners delete it");
       return store.removeQuiz(id);
     },
 
@@ -275,7 +296,7 @@ export function makeApi(host: Host) {
       const done = alias ? store.sessionsDone(alias) : {};
       return {
         course,
-        may: { edit: canEdit(course, me) },
+        may: { edit: canEdit(course, store.access()) },
         quizzes,
         progress: {
           taken: taken.length,
@@ -353,10 +374,12 @@ export function makeApi(host: Host) {
         const title = blueprint.properties?.['title'];
         return typeof id === 'string' ? [{ id, title: typeof title === 'string' ? title : id }] : [];
       });
+      // every collection and category the framework declares, an empty one included
       const groups = new Set<string>();
-      for (const blueprint of context.blueprints) {
-        groups.add(blueprint.collection.name);
-        if (blueprint.group) groups.add(`${blueprint.collection.name}/${blueprint.group}`);
+      for (const folder of context.framework.folders) {
+        if (folder.ownedBy !== '@eidos/collections') continue;
+        groups.add(folder.name);
+        for (const group of (folder as { grouping?: { groups?: Array<{ name: string }> } | null }).grouping?.groups ?? []) groups.add(`${folder.name}/${group.name}`);
       }
       return { blueprints, groups: [...groups].sort() };
     },

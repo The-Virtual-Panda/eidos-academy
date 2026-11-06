@@ -5,7 +5,7 @@ import { existsSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { HostError, type CliEntry, type Host } from 'eidosmd/plugin';
 import { makeApi } from './api.ts';
-import { compare, questionProblems, renderCourse, renderQuiz, type Question } from './model.ts';
+import { askable, compare, questionProblems, renderCourse, renderQuiz, type Question } from './model.ts';
 
 export type { Api } from './api.ts';
 
@@ -69,7 +69,8 @@ const entry: CliEntry = {
           await run(command, (json) => {
             const overview = api.overview();
             const lines = overview.quizzes.map(
-              (row) => `${row.id}  ${row.title}  ·  ${row.course_title ? `${row.course_title} ${row.place}` : 'one-off'}  ·  ${row.questions} questions  ·  best ${asPercent(row.best)}`,
+              (row) =>
+                `${row.id}  ${row.title}  ·  ${row.course_title ? `${row.course_title} ${row.place}` : 'one-off'}  ·  ${row.status === 'closed' ? 'closed  ·  ' : ''}${row.questions} questions  ·  best ${asPercent(row.best)}`,
             );
             say(json, overview, lines.join('\n') || 'no quizzes yet; eidos quizzes new "<Title>" starts one');
           });
@@ -79,7 +80,7 @@ const entry: CliEntry = {
         .command('show')
         .argument('<quiz>', "the quiz's id")
         .description('one quiz, with its questions and answers')
-        .option('--json', 'the quiz: { id, title, draws_from[], created_by, results_proctors[], rank, course, questions[], path }')
+        .option('--json', 'the quiz: { id, title, draws_from[], created_by, proctors[], rank, course, questions[], path }')
         .action(async (id: string, _options: unknown, command: Options) => {
           await run(command, (json) => {
             const quiz = store.quiz(id);
@@ -95,10 +96,12 @@ const entry: CliEntry = {
         .option('--course <course>', "the course's id; absent, a one-off")
         .option('--place <n>', 'its place in the course, from 1; absent, last')
         .option('--created-by <alias>', 'who created it; absent, you')
+        .option('--open', 'open it at once; absent, it starts closed until it is ready')
         .option('--json', 'the quiz')
-        .action(async (title: string, options: { drawsFrom: string[]; course?: string; place?: string; createdBy?: string }, command: Options) => {
+        .action(async (title: string, options: { drawsFrom: string[]; course?: string; place?: string; createdBy?: string; open?: boolean }, command: Options) => {
           await run(command, async (json) => {
             const quiz = await store.createQuiz({
+              ...(options.open ? { status: 'open' as const } : {}),
               title,
               draws_from: options.drawsFrom,
               course: options.course ? store.course(options.course).id : null,
@@ -112,33 +115,47 @@ const entry: CliEntry = {
       quizzes
         .command('set')
         .argument('<quiz>', "the quiz's id")
-        .description("change a quiz's title, sources, course, place, creator, or results proctors")
+        .description("change a quiz's title, sources, course, place, creator, or proctors")
+        .option('--status <status>', 'open or closed')
         .option('--title <title>', 'its title')
         .option('--add-source <source>', 'a blueprint id, an asset path, or a link to draw from (repeatable)', collect, [] as string[])
         .option('--remove-source <source>', 'stop drawing from it (repeatable)', collect, [] as string[])
         .option('--course <course>', 'move it into this course; "" makes it a one-off')
         .option('--place <n>', 'its place in its course, from 1')
         .option('--created-by <alias>', 'hand it to another creator')
-        .option('--add-proctor <alias>', 'a results proctor (repeatable)', collect, [] as string[])
-        .option('--remove-proctor <alias>', 'no longer a results proctor (repeatable)', collect, [] as string[])
+        .option('--add-proctor <alias>', 'a proctor (repeatable)', collect, [] as string[])
+        .option('--remove-proctor <alias>', 'no longer a proctor (repeatable)', collect, [] as string[])
         .option('--json', 'the quiz')
         .action(
           async (
             id: string,
-            options: { title?: string; addSource: string[]; removeSource: string[]; course?: string; place?: string; createdBy?: string; addProctor: string[]; removeProctor: string[] },
+            options: {
+              status?: string;
+              title?: string;
+              addSource: string[];
+              removeSource: string[];
+              course?: string;
+              place?: string;
+              createdBy?: string;
+              addProctor: string[];
+              removeProctor: string[];
+            },
             command: Options,
           ) => {
             await run(command, async (json) => {
               let quiz = store.quiz(id);
+              if (options.status !== undefined && options.status !== 'open' && options.status !== 'closed') throw new HostError(400, '--status is open or closed');
+              if (options.status === 'open' && askable(quiz).length === 0) throw new HostError(400, 'add a question before opening this quiz');
               if (options.course !== undefined) quiz = await store.moveQuiz(quiz.id, options.course === '' ? null : store.course(options.course).id);
               const known = new Set(store.people().map((person) => person.alias));
               for (const alias of options.addProctor) if (!known.has(alias)) throw new HostError(400, `${alias} is not in the project's users; eidos users lists them`);
               await store.saveQuiz({
                 ...quiz,
+                ...(options.status ? { status: options.status as 'open' | 'closed' } : {}),
                 ...(options.title ? { title: options.title } : {}),
                 ...(options.createdBy ? { created_by: options.createdBy } : {}),
                 draws_from: [...new Set([...quiz.draws_from.filter((source) => !options.removeSource.includes(source)), ...options.addSource])],
-                results_proctors: [...new Set([...quiz.results_proctors.filter((alias) => !options.removeProctor.includes(alias)), ...options.addProctor])],
+                proctors: [...new Set([...quiz.proctors.filter((alias) => !options.removeProctor.includes(alias)), ...options.addProctor])],
               });
               if (options.place) await store.place(quiz.id, Number(options.place));
               const saved = store.quiz(quiz.id);

@@ -102,7 +102,7 @@ test('courses order their quizzes, and a course removed leaves one-offs', async 
 });
 
 test('an official attempt is committed, a practice attempt stays local, and copies survive a regenerate', async () => {
-  const quiz = await json<Quiz>('quizzes', 'new', 'Attempts', '--created-by', 'bo');
+  const quiz = await json<Quiz>('quizzes', 'new', 'Attempts', '--created-by', 'bo', '--open');
   const one = await question(quiz.id, 'One');
   const two = await question(quiz.id, 'Two');
 
@@ -154,4 +154,57 @@ test('results are shown to the creator, proctors, and owners, and totals to ever
 
   const refused = await sandbox.run(['quizzes', 'set', quiz.id, '--add-proctor', 'nobody'], { env: { EIDOS_USER: 'bo' } });
   assert.match(refused.stderr, /not in the project's users/);
+});
+
+test('with no owner marked, or no user selected, everyone sees results and practice still saves', async () => {
+  const quiz = await json<Quiz>('quizzes', 'new', 'Open to all', '--created-by', 'bo');
+  const one = await question(quiz.id, 'One');
+  const file = path.join(sandbox.root, SETTINGS);
+  const held = readFileSync(file, 'utf8');
+  const local = path.join(sandbox.root, '.eidos/plugins/eidosmd/local.yaml');
+  const localHeld = readFileSync(local, 'utf8');
+  try {
+    const settings = parse(held) as { users: Array<Record<string, unknown>> };
+    settings.users = settings.users.map(({ owner: _owner, ...user }) => user);
+    writeFileSync(file, stringify(settings));
+    const asAda = await sandbox.run(['quizzes', 'results', quiz.id, '--json'], { env: { EIDOS_USER: 'ada' } });
+    assert.deepEqual(JSON.parse(asAda.stdout).everyone, [], 'no owner marked: ada sees results');
+
+    writeFileSync(file, held);
+    const { user: _user, ...unset } = parse(localHeld) as Record<string, unknown>;
+    writeFileSync(local, stringify(unset));
+    const asNobody = await sandbox.run(['quizzes', 'results', quiz.id, '--json'], { env: { EIDOS_USER: 'nobody-listed' } });
+    assert.deepEqual(JSON.parse(asNobody.stdout).everyone, [], 'no user selected: results show');
+    const practice = await sandbox.route<{ attempt: { by: string; score: number } }>('POST', 'attempt', {
+      body: { quiz: quiz.id, kind: 'practice', mode: 'whole', answers: [{ question: one.id, chosen: 0 }] },
+    });
+    assert.equal(practice.attempt.by, 'local');
+    assert.equal(practice.attempt.score, 1);
+    const shown = await sandbox.route<{ may: { edit: boolean; results: boolean }; scores: { history: unknown[] } }>('GET', 'quiz', { query: { id: quiz.id } });
+    assert.deepEqual([shown.may.edit, shown.may.results, shown.scores.history.length], [true, true, 1]);
+  } finally {
+    writeFileSync(file, held);
+    writeFileSync(local, localHeld);
+  }
+});
+
+test('a quiz starts closed: no official attempts, editors may try it out, and it opens once it has questions', async () => {
+  const quiz = await json<Quiz & { status: string }>('quizzes', 'new', 'Not ready', '--created-by', 'bo');
+  assert.equal(quiz.status, 'closed');
+  const empty = await sandbox.run(['quizzes', 'set', quiz.id, '--status', 'open'], { env: { EIDOS_USER: 'bo' } });
+  assert.match(empty.stderr, /add a question/);
+  const one = await question(quiz.id, 'One');
+
+  // the page acts as ada, who neither created it nor proctors it
+  const body = (kind: string) => ({ quiz: quiz.id, kind, mode: 'whole', answers: [{ question: one.id, chosen: 0 }] });
+  await assert.rejects(sandbox.route('POST', 'attempt', { body: body('official') }), /closed/);
+  await assert.rejects(sandbox.route('POST', 'attempt', { body: body('practice') }), /closed/);
+
+  await json('quizzes', 'set', quiz.id, '--add-proctor', 'ada');
+  await assert.rejects(sandbox.route('POST', 'attempt', { body: body('official') }), /closed/);
+  await sandbox.route('POST', 'attempt', { body: body('practice') });
+
+  await json('quizzes', 'set', quiz.id, '--status', 'open');
+  await sandbox.route('POST', 'attempt', { body: body('official') });
+  assert.match(readFileSync(path.join(sandbox.root, quiz.path), 'utf8'), /status: open/);
 });
