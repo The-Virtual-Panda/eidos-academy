@@ -5,7 +5,7 @@ Quizzes builds multiple-choice quizzes on a project's content. A person takes a 
 ### Where things are
 
 - `quizzes/` (the folder the framework declares as `@quizzes/quizzes`): a one-off quiz is a file directly in it. A course is a folder holding `course.md` and its quizzes. Never move, rename, or delete these by hand; use the commands.
-- `.eidos/plugins/quizzes/results/<alias>/`: official attempts, one file each, and `sessions.yaml`, the study sessions that person finished. Never write these.
+- `.eidos/plugins/quizzes/results/<alias>/`: official attempts, one file each, `sessions.yaml`, the study sessions that person finished, and `enrollments.yaml`, the courses they are enrolled in. Never write these.
 - `.eidos/plugins/quizzes/local/`: practice attempts on this machine. Never committed.
 - A project's content (lessons, wiki pages, study plans) is never in any of these. It stays blueprints and assets in the project.
 
@@ -15,7 +15,7 @@ The CLI owns the file; the conversation owns the words.
 
 ```bash
 eidos quizzes list [--json]
-eidos quizzes new "<Title>" --draws-from <blueprint id, asset path, or link> [--course <id>] [--place <n>] [--created-by <alias>] [--json]
+eidos quizzes new "<Title>" --draws-from <blueprint id, asset path, or link> [--course <id>] [--place <n>] [--created-by <alias>] [--closed] [--json]
 eidos quizzes question add <quiz> --prompt "<text>" --option "<text>" --option "<text>" --answer <n> --why "<text>" [--reference "<text>"] [--json]
 eidos quizzes question set <quiz> <question> [--prompt ...] [--option ...] [--answer <n>] [--why ...] [--reference ...] [--regenerated] [--json]
 eidos quizzes question remove <quiz> <question>
@@ -33,7 +33,7 @@ When you generate questions:
 - Replacing a question with a different one, use `question set --regenerated`: it takes a new id and counts as not yet seen. Past attempts keep their copy of the old one.
 - `--created-by` is the person you are working for, never yourself.
 
-A new quiz starts closed: nobody can take it officially until someone who edits it opens it (`eidos quizzes set <quiz> --status open`), and they can try it out as practice meanwhile. Leave it closed when you finish writing, and tell the person it is ready to open. `eidos quizzes new --open` is for a person who asks for it open.
+A quiz is open by default as soon as it has a question, so someone could start it while you are still writing. When you write more than one question, keep it closed while you do: start it with `eidos quizzes new --closed` (on a quiz that already exists, `eidos quizzes set <quiz> --status closed`), then run `eidos quizzes set <quiz> --status open` after the last question. A quiz the person closed stays closed unless they ask you to open it. Closed, a quiz takes no official attempts, and those who edit it can try it out as practice.
 
 ### Courses
 
@@ -46,6 +46,17 @@ eidos quizzes course remove <course>
 ```
 
 A link is a collection (`study-plans`), a category (`study-plans/old-testament`), or a blueprint id. The order in a course suggests a path and locks nothing. Removing a course leaves its quizzes as one-offs.
+
+A person enrolls in a course to follow their progress across it. Anyone may, a course's creator and its proctors too, and nobody needs to enroll to take a quiz. Only people enroll, so never enroll yourself.
+
+```bash
+eidos quizzes course enroll <course> [--json]
+eidos quizzes course leave <course> [--json]
+eidos quizzes course progress <course> [--person <alias>] [--json]
+eidos quizzes course people <course> [--json]
+```
+
+`progress` shows an enrolled person's quizzes and scores: the person acting's own, or anyone's for the course's creator, the creators and proctors of its quizzes, and the project's owners, who alone get `people`, the list of everyone enrolled. Leaving a course keeps every result.
 
 ### Writing a study plan
 

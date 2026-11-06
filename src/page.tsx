@@ -1,8 +1,9 @@
 // Quizzes's page half: its activity in the Primary Sidebar, the list and its filters, a
 // course, a quiz and its tabs, taking a quiz, the builder, the view beside a blueprint, and
 // the slash commands that bring in the person's own agent.
-import { useEffect, useMemo, useState, type JSX, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type JSX, type ReactNode } from 'react';
 import {
+  Badge,
   Button,
   Empty,
   Input,
@@ -20,6 +21,7 @@ import {
   Seg,
   SegItem,
   Select,
+  SkeletonBar,
   Stack,
   Text,
   Textarea,
@@ -29,8 +31,8 @@ import {
   type PagePlugin,
   type PluginHost,
 } from 'eidosmd/page';
-import { asPercent, Delta, Failed, formatDate, HelpMark, LaptopMark, Loading, Stat, Surface, useAct, useData, UserPill, useTrail } from './page-kit.tsx';
-import type { Attempt, AttemptKind, AttemptMode, Comparison, Course, MyScores, PersonResult, Question, Quiz } from './model.ts';
+import { asPercent, ContextMenu, Delta, Failed, formatDate, HelpMark, LaptopMark, Loading, Stat, Surface, useAct, useData, UserPill, useTrail, type MenuEntry } from './page-kit.tsx';
+import type { Attempt, AttemptKind, AttemptMode, Comparison, Course, CourseProgress, MyScores, PersonResult, Question, Quiz } from './model.ts';
 
 // ---- what the routes answer ------------------------------------------------------------
 
@@ -47,12 +49,14 @@ interface Row_ {
   created_by_name: string | null;
   status: 'open' | 'closed';
   best: number | null;
+  may_edit: boolean;
+  may_manage: boolean;
 }
 interface Overview {
   me: { name: string; alias: string | null; owner: boolean } | null;
   folder: string;
   quizzes: Row_[];
-  courses: Array<{ id: string; title: string; created_by: string | null }>;
+  courses: Array<{ id: string; title: string; created_by: string | null; enrolled: boolean; may_edit: boolean }>;
 }
 interface QuizView {
   quiz: Quiz;
@@ -75,11 +79,26 @@ interface Pickable {
 interface CourseView {
   course: Course;
   created_by_name: string | null;
-  may: { edit: boolean };
+  may: { edit: boolean; people: boolean; enroll: boolean; enroll_why: string | null };
+  enrolled_since: string | null;
+  enrolled_people: number;
+  people: Array<{ alias: string; name: string }>;
   quizzes: Row_[];
   progress: { taken: number; of: number; average_best: number | null; sessions_done: number; sessions: number };
   content: Array<{ id: string; title: string; rel: string }>;
   sessions: Array<{ id: string; title: string; rel: string; done: boolean }>;
+}
+interface ProgressView {
+  person: { alias: string; name: string };
+  mine: boolean;
+  enrolled_since: string;
+  progress: CourseProgress;
+  sessions_done: number;
+  sessions: number;
+}
+interface RosterView {
+  people: Array<{ alias: string; name: string; since: string; taken: number; of: number; average_best: number | null; last_taken: string | null; sessions_done: number; sessions: number }>;
+  average_best: number | null;
 }
 interface Submitted {
   attempt: Attempt;
@@ -147,6 +166,9 @@ function generateText(quiz: Quiz, count: number, alias: string | null): string {
     `Generate ${count} multiple-choice questions for the quiz ${quiz.id}, "${quiz.title}".`,
     quiz.draws_from.length > 0 ? `It draws from: ${quiz.draws_from.join(', ')}. Read all of it, and base every question strictly on it.` : 'It draws from nothing yet, so ask me what it should cover.',
     `Run \`eidos instructions quizzes\` first and follow what it says about writing questions, then add each one with \`eidos quizzes question add ${quiz.id}\`.`,
+    quiz.closed
+      ? 'It is closed, so leave it closed when you finish.'
+      : `So nobody starts a half-written quiz, first run \`eidos quizzes set ${quiz.id} --status closed\`, and after the last question run \`eidos quizzes set ${quiz.id} --status open\`.`,
     alias ? `You are working for @${alias}.` : '',
   ]
     .filter(Boolean)
@@ -167,17 +189,108 @@ const studyPlanText = (what: string): string =>
 
 // ---- the activity ----------------------------------------------------------------------------
 
+// What Created by me lists: the quizzes a person made, and the quizzes of the courses they made.
+function isMine(row: Row_, overview: Overview): boolean {
+  const alias = overview.me?.alias ?? null;
+  if (alias === null) return false;
+  return row.created_by === alias || overview.courses.some((course) => course.id === row.course && course.created_by === alias);
+}
+
 function Sidebar(): JSX.Element {
   const host = usePluginHost();
   const { data } = useData<Overview>('overview');
+  const [making, setMaking] = useState<'quiz' | 'course' | null>(null);
   const alias = data?.me?.alias ?? null;
   const quizzes = data?.quizzes ?? [];
+  const courses = data?.courses ?? [];
+  const enrolled = courses.filter((course) => course.enrolled);
   const here = typeof window === 'undefined' ? '' : window.location.pathname + window.location.search;
-  const entry = (label: string, to: string, count?: number): JSX.Element => (
+  const act = useAct();
+  const [menu, setMenu] = useState<{ x: number; y: number; items: MenuEntry[] } | null>(null);
+  const opens = (items: MenuEntry[]) => (event: { clientX: number; clientY: number; preventDefault: () => void }) => {
+    event.preventDefault();
+    setMenu({ x: event.clientX, y: event.clientY, items });
+  };
+  const go = (label: string, to: string): MenuEntry => ({ label, run: () => host.navigate(to) });
+  const copyId = (id: string): MenuEntry => ({ label: 'Copy id', run: () => void navigator.clipboard?.writeText(id), rule: true });
+  const newQuiz: MenuEntry = { label: 'New quiz', run: () => setMaking('quiz') };
+  const newCourse: MenuEntry = { label: 'New course', run: () => setMaking('course') };
+  const rename = (what: string, title: string, route: string): MenuEntry => ({
+    label: 'Rename',
+    run: async () => {
+      const next = await host.dialog.prompt(`A new name for this ${what}`, { title: `Rename ${what}`, value: title, ok: 'Rename' });
+      if (next && next.trim() && next !== title) await act(`Could not rename the ${what}`, () => host.put(route, { title: next }));
+    },
+  });
+  const courseMenu = (course: Overview['courses'][number]): MenuEntry[] => {
+    const page = pageHref(host, `course/${Q(course.id)}`);
+    return [
+      go('Open', page),
+      ...(course.enrolled ? [go('My progress', `${page}/progress`)] : []),
+      ...(course.may_edit ? [go('Enrolled', `${page}/people`)] : []),
+      copyId(course.id),
+      course.enrolled
+        ? { label: 'Leave course', run: () => void act('Could not leave the course', () => host.del(`course/enroll?id=${Q(course.id)}`)) }
+        : { label: 'Enroll', run: () => void act('Could not enroll', () => host.post(`course/enroll?id=${Q(course.id)}`)) },
+      ...(course.may_edit
+        ? [
+            rename('course', course.title, `course?id=${Q(course.id)}`),
+            {
+              label: 'Delete',
+              danger: true,
+              rule: true,
+              run: async () => {
+                const held = quizzes.filter((row) => row.course === course.id).length;
+                if (await host.dialog.confirm(`Delete ${course.title}? Its ${held} quizzes stay, as one-offs.`, { title: 'Delete course', ok: 'Delete', danger: true })) {
+                  await act('Could not delete the course', () => host.del(`course?id=${Q(course.id)}`));
+                }
+              },
+            },
+          ]
+        : []),
+    ];
+  };
+  const quizMenu = (row: Row_): MenuEntry[] => {
+    const page = pageHref(host, `quiz/${Q(row.id)}`);
+    const take = pageHref(host, `take/${Q(row.id)}`);
+    const canPractice = row.questions > 0 && (row.status === 'open' || row.may_edit);
+    return [
+      go('Open', page),
+      ...(row.status === 'open' ? [go('Take officially', `${take}?kind=official&mode=whole`)] : []),
+      ...(canPractice ? [go('Practice', `${take}?kind=practice&mode=whole`)] : []),
+      ...(row.may_edit ? [go('Questions', `${page}/questions`)] : []),
+      copyId(row.id),
+      ...(row.may_edit && row.questions > 0
+        ? [
+            {
+              label: row.status === 'open' ? 'Close quiz' : 'Open quiz',
+              run: () => void act('Could not change the quiz', () => host.put(`quiz?id=${Q(row.id)}`, { status: row.status === 'open' ? 'closed' : 'open' })),
+            },
+          ]
+        : []),
+      ...(row.may_edit ? [rename('quiz', row.title, `quiz?id=${Q(row.id)}`)] : []),
+      ...(row.may_manage
+        ? [
+            {
+              label: 'Delete',
+              danger: true,
+              rule: true,
+              run: async () => {
+                if (await host.dialog.confirm(`Delete ${row.title}? The results people already have stay in their history.`, { title: 'Delete quiz', ok: 'Delete', danger: true })) {
+                  await act('Could not delete the quiz', () => host.del(`quiz?id=${Q(row.id)}`));
+                }
+              },
+            },
+          ]
+        : []),
+    ];
+  };
+  const entry = (label: string, to: string, items: MenuEntry[], count?: number | string): JSX.Element => (
     <NavLink
       key={to}
       href={to}
-      active={here === to}
+      onContextMenu={opens(items)}
+      active={here.replace(/\/(?=\?|$)/, '') === to.replace(/\/(?=\?|$)/, '')}
       onClick={(event: { preventDefault: () => void }) => {
         event.preventDefault();
         host.navigate(to);
@@ -188,31 +301,48 @@ function Sidebar(): JSX.Element {
     </NavLink>
   );
   const root = pageHref(host, '');
+  const group = (label: string, what: 'quiz' | 'course'): JSX.Element => (
+    <NavGroup onContextMenu={opens([what === 'quiz' ? newQuiz : newCourse])}>
+      <span>{label}</span>
+      <Button size="sm" variant="quiet" aria-label={`New ${what}`} title={`New ${what}`} onClick={() => setMaking(what)}>
+        +
+      </Button>
+    </NavGroup>
+  );
   return (
-    <Nav>
-      <NavHead>
-        <b>Quizzes</b>
-      </NavHead>
-      {entry('All quizzes', root, quizzes.length)}
-      {entry('Created by me', `${root}?show=mine`, quizzes.filter((row) => row.created_by === alias).length)}
-      {entry('Not yet taken', `${root}?show=untaken`, quizzes.filter((row) => row.best === null).length)}
-      {data && data.courses.length > 0 && (
-        <>
-          <NavGroup>
-            <span>Courses</span>
-          </NavGroup>
-          {data.courses.map((course) => entry(course.title, pageHref(host, `course/${Q(course.id)}`), quizzes.filter((row) => row.course === course.id).length))}
-        </>
-      )}
-      {quizzes.some((row) => row.course === null) && (
-        <>
-          <NavGroup>
-            <span>Quizzes</span>
-          </NavGroup>
-          {quizzes.filter((row) => row.course === null).map((row) => entry(row.title, pageHref(host, `quiz/${Q(row.id)}`)))}
-        </>
-      )}
-    </Nav>
+    <Surface>
+      <Nav>
+        <NavHead>
+          <b>Quizzes</b>
+        </NavHead>
+        {entry('Get started', pageHref(host, 'start'), [go('Open', pageHref(host, 'start'))])}
+        {(quizzes.length > 0 || courses.length > 0) && entry('All quizzes', root, [go('Open', root), { ...newQuiz, rule: true }, newCourse], quizzes.length)}
+        {data &&
+          alias !== null &&
+          courses.some((course) => course.created_by === alias) &&
+          entry('Created by me', `${root}?show=mine`, [go('Open', `${root}?show=mine`), { ...newQuiz, rule: true }, newCourse], quizzes.filter((row) => isMine(row, data)).length)}
+        {enrolled.length > 0 && entry('My courses', pageHref(host, 'my-courses'), [go('Open', pageHref(host, 'my-courses'))], enrolled.length)}
+        {data && (
+          <>
+            {group('Courses', 'course')}
+            {courses.map((course) => {
+              const inCourse = quizzes.filter((row) => row.course === course.id);
+              return entry(
+                course.title,
+                pageHref(host, `course/${Q(course.id)}`),
+                courseMenu(course),
+                course.enrolled ? `${inCourse.filter((row) => row.best !== null).length}/${inCourse.length}` : inCourse.length,
+              );
+            })}
+            {group('Quizzes', 'quiz')}
+            {quizzes.filter((row) => row.course === null).map((row) => entry(row.title, pageHref(host, `quiz/${Q(row.id)}`), quizMenu(row)))}
+          </>
+        )}
+      </Nav>
+      {making === 'quiz' && <NewQuiz onClose={() => setMaking(null)} courses={courses} draws={[]} course={null} />}
+      {making === 'course' && <NewCourse onClose={() => setMaking(null)} />}
+      {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
+    </Surface>
   );
 }
 
@@ -220,26 +350,33 @@ function Sidebar(): JSX.Element {
 
 type SortKey = 'title' | 'course' | 'questions' | 'created_by' | 'best';
 
+const PAGE_SIZES = [25, 50, 100, 250];
+
 function QuizList({ show }: { show: string | null }): JSX.Element {
   const host = usePluginHost();
-  const { data, error } = useData<Overview>('overview');
+  const { data, error, reload } = useData<Overview>('overview');
   const [search, setSearch] = useState('');
   const [course, setCourse] = useState('');
   const [creator, setCreator] = useState('');
   const [sort, setSort] = useState<{ key: SortKey; turned: boolean } | null>(null);
+  const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState(50);
   const [making, setMaking] = useState<'quiz' | 'course' | null>(null);
   useTrail(null);
+  // nothing to list: the landing page is Get started, on its own address so writing its first file never takes it away
+  const nothing = data !== null && data.quizzes.length === 0 && data.courses.length === 0;
+  useEffect(() => {
+    if (nothing && show === null) host.navigate(pageHref(host, 'start'), { replace: true });
+  }, [host, nothing, show]);
 
   const rows = useMemo(() => {
     if (!data) return [];
-    const alias = data.me?.alias ?? null;
     const words = search.toLowerCase().split(/\s+/).filter(Boolean);
     const kept = data.quizzes.filter((row) => {
-      if (show === 'mine' && row.created_by !== alias) return false;
-      if (show === 'untaken' && row.best !== null) return false;
+      if (show === 'mine' && !isMine(row, data)) return false;
       if (course && (course === 'oneoff' ? row.course !== null : row.course !== course)) return false;
       if (creator && row.created_by !== creator) return false;
-      const held = `${row.id} ${row.title} ${row.course_title ?? ''} ${row.draws_from.join(' ')} ${row.created_by ?? ''}`.toLowerCase();
+      const held = `${row.id} ${row.title} ${row.course_title ?? ''} ${row.draws_from.join(' ')} ${row.created_by ?? ''} ${row.created_by_name ?? ''}`.toLowerCase();
       return words.every((word) => held.includes(word));
     });
     if (!sort) return kept;
@@ -252,18 +389,43 @@ function QuizList({ show }: { show: string | null }): JSX.Element {
     return sort.turned ? ordered.reverse() : ordered;
   }, [data, search, course, creator, sort, show]);
 
-  if (error) return <Failed message={error} />;
-  if (!data) return <Loading />;
+  const pages = Math.max(1, Math.ceil(rows.length / pageSize));
+  const at = Math.min(page, pages - 1);
+  const shown = rows.slice(at * pageSize, (at + 1) * pageSize);
+  // ← and → page the table, except from a field, a tab, or with a modal over it
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+      if (event.metaKey || event.ctrlKey || event.altKey || (event.target as HTMLElement | null)?.closest?.('input, textarea, select, [contenteditable], [role="tab"]')) return;
+      if (document.querySelector('[data-slot=backdrop]')) return;
+      if (event.key === 'ArrowLeft' && at > 0) setPage(at - 1);
+      else if (event.key === 'ArrowRight' && at < pages - 1) setPage(at + 1);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [at, pages]);
 
-  const header = (key: SortKey, label: string, num = false): JSX.Element => (
-    <th className={num ? 'num' : undefined} aria-sort={sort?.key === key ? (sort.turned ? 'descending' : 'ascending') : undefined}>
-      <button className="qz-sort" onClick={() => setSort(sort?.key !== key ? { key, turned: false } : !sort.turned ? { key, turned: true } : null)}>
-        {label}
-        {sort?.key === key ? (sort.turned ? ' ↓' : ' ↑') : ''}
-      </button>
+  if (error) return <Failed message={error} />;
+  if (nothing && show === null) return <Loading />;
+
+  const narrow = <T,>(set: (value: T) => void, value: T): void => {
+    set(value);
+    setPage(0);
+  };
+  const header = (key: SortKey, label: string): JSX.Element => (
+    <th
+      role="button"
+      aria-sort={sort?.key === key ? (sort.turned ? 'descending' : 'ascending') : undefined}
+      onClick={() => setSort(sort?.key !== key ? { key, turned: false } : !sort.turned ? { key, turned: true } : null)}
+    >
+      {label}
+      {sort?.key === key && <span className="qz-dt-dir">{sort.turned ? '↓' : '↑'}</span>}
     </th>
   );
-  const creators = [...new Set(data.quizzes.flatMap((row) => row.created_by ?? []))];
+  const creators = [...new Map((data?.quizzes ?? []).flatMap((row) => (row.created_by ? [[row.created_by, row.created_by_name ?? row.created_by] as const] : []))).entries()];
+  const open = (row: Row_): void => host.navigate(pageHref(host, `quiz/${Q(row.id)}`));
+  const first = rows.length === 0 ? 0 : at * pageSize + 1;
+  const last = Math.min(rows.length, (at + 1) * pageSize);
   return (
     <Surface>
       <Page>
@@ -271,7 +433,7 @@ function QuizList({ show }: { show: string | null }): JSX.Element {
           <Row justify="between" wrap style={{ width: '100%' }}>
             <Row gap="sm">
               <PageTitle>Quizzes</PageTitle>
-              <Text tone="faint">{rows.length}</Text>
+              {data && <Text tone="faint">{rows.length}</Text>}
             </Row>
             <Row gap="sm">
               <Button onClick={() => setMaking('course')}>New course</Button>
@@ -281,55 +443,113 @@ function QuizList({ show }: { show: string | null }): JSX.Element {
             </Row>
           </Row>
         </PageHead>
-        <Row gap="sm" wrap>
-          <Input aria-label="Search quizzes" placeholder="Search quizzes" value={search} onChange={(event: { target: HTMLInputElement }) => setSearch(event.target.value)} />
-          <Select aria-label="Course" value={course} onChange={(event: { target: HTMLSelectElement }) => setCourse(event.target.value)}>
-            <option value="">Course: all</option>
-            {data.courses.map((held) => (
-              <option key={held.id} value={held.id}>
-                {held.title}
-              </option>
-            ))}
-            <option value="oneoff">One-off</option>
-          </Select>
-          <Select aria-label="Created by" value={creator} onChange={(event: { target: HTMLSelectElement }) => setCreator(event.target.value)}>
-            <option value="">Created by: anyone</option>
-            {creators.map((alias) => (
-              <option key={alias} value={alias}>
-                @{alias}
-              </option>
-            ))}
-          </Select>
-        </Row>
-        <div className="qz-scroll" style={{ marginTop: 10, fontSize: 'var(--text-base)' }}>
-          <table className="qz-table" style={{ minWidth: 620 }}>
+        <div className="qz-filters">
+          <div className="qz-filters-top">
+            <span className="qz-search" data-set={search !== '' || undefined}>
+              <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" aria-hidden="true">
+                <circle cx="7" cy="7" r="4.5" />
+                <path d="M10.5 10.5L14 14" />
+              </svg>
+              <Input
+                type="search"
+                aria-label="Search quizzes"
+                placeholder="Search"
+                value={search}
+                onChange={(event: { target: HTMLInputElement }) => narrow(setSearch, event.target.value)}
+                onKeyDown={(event: { key: string; currentTarget: HTMLInputElement }) => event.key === 'Escape' && event.currentTarget.blur()}
+              />
+              {search !== '' && (
+                <button type="button" aria-label="Clear the search" onClick={() => narrow(setSearch, '')}>
+                  ×
+                </button>
+              )}
+            </span>
+            <Button size="icon" aria-label="Refresh" title="Refresh" onClick={reload}>
+              <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M13 3.5v3h-3M3 12.5v-3h3" />
+                <path d="M12.6 6.5A5 5 0 0 0 3.6 5.2M3.4 9.5a5 5 0 0 0 9 1.3" />
+              </svg>
+            </Button>
+          </div>
+          <div className="qz-filters-row">
+            <Select filter aria-label="Course" value={course} onChange={(event: { target: HTMLSelectElement }) => narrow(setCourse, event.target.value)}>
+              <option value="">Course</option>
+              {(data?.courses ?? []).map((held) => (
+                <option key={held.id} value={held.id}>
+                  {held.title}
+                </option>
+              ))}
+              <option value="oneoff">One-off</option>
+            </Select>
+            <Select filter aria-label="Created by" value={creator} onChange={(event: { target: HTMLSelectElement }) => narrow(setCreator, event.target.value)}>
+              <option value="">Created by</option>
+              {creators.map(([alias, name]) => (
+                <option key={alias} value={alias}>
+                  {name}
+                </option>
+              ))}
+            </Select>
+            {(search !== '' || course !== '' || creator !== '') && (
+              <Button
+                size="sm"
+                variant="quiet"
+                onClick={() => {
+                  setSearch('');
+                  setCourse('');
+                  setCreator('');
+                  setPage(0);
+                }}
+              >
+                Clear
+              </Button>
+            )}
+          </div>
+        </div>
+        <div className="qz-dt-wrap" data-slot="table-wrap">
+          <table className="qz-dt">
             <thead>
               <tr>
                 {header('title', 'Title')}
                 {header('course', 'Course')}
                 <th>Draws from</th>
-                {header('questions', 'Questions', true)}
+                {header('questions', 'Questions')}
                 {header('created_by', 'Created by')}
-                {header('best', 'Your best', true)}
+                {header('best', 'Your best')}
               </tr>
             </thead>
             <tbody>
-              {rows.map((row) => (
-                <tr key={row.id}>
-                  <td>
-                    <button className="qz-rowlink" onClick={() => host.navigate(pageHref(host, `quiz/${Q(row.id)}`))}>
+              {!data &&
+                [0, 1, 2, 3, 4, 5].map((row) => (
+                  <tr key={row}>
+                    {[0, 1, 2, 3, 4, 5].map((cell) => (
+                      <td key={cell}>
+                        <SkeletonBar width={cell === 0 ? 180 : 70} height={12} />
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              {shown.map((row) => (
+                <tr
+                  key={row.id}
+                  onClick={(event) => {
+                    if (!(event.target as HTMLElement).closest('a, button')) open(row);
+                  }}
+                >
+                  <td data-cell="title">
+                    <button className="qz-rowlink" onClick={() => open(row)}>
                       {row.title}
                     </button>
                     {row.status === 'closed' && (
                       <>
                         {' '}
-                        <span className="qz-badge">Closed</span>
+                        <Badge>Closed</Badge>
                       </>
                     )}
+                    <div className="qz-dt-id">{row.id}</div>
                   </td>
                   <td>
                     {row.course ? (
-                      <Link className="qz-link" to={pageHref(host, `course/${Q(row.course)}`)} style={{ color: 'var(--color-accent)' }}>
+                      <Link className="qz-dt-link" to={pageHref(host, `course/${Q(row.course)}`)}>
                         {row.course_title} · {row.place}
                       </Link>
                     ) : (
@@ -337,29 +557,91 @@ function QuizList({ show }: { show: string | null }): JSX.Element {
                     )}
                   </td>
                   <td>{row.draws_from.join(', ') || <Text tone="faint">Nothing yet</Text>}</td>
-                  <td className="num">{row.questions}</td>
+                  <td>{row.questions}</td>
                   <td>{row.created_by ? <UserPill alias={row.created_by} name={row.created_by_name} /> : <Text tone="faint">Unknown</Text>}</td>
-                  <td className="num">{row.best === null ? <Text tone="faint">Not yet</Text> : asPercent(row.best)}</td>
+                  <td>{row.best === null ? <Text tone="faint">Not yet</Text> : asPercent(row.best)}</td>
                 </tr>
               ))}
-              {rows.length === 0 && (
+              {data && rows.length === 0 && (
                 <tr>
-                  <td colSpan={6}>
-                    <Text tone="muted">{data.quizzes.length === 0 ? 'No quizzes yet. New quiz starts one from your content.' : 'No quizzes match. Clear the search or the filters.'}</Text>
+                  <td className="qz-dt-empty" colSpan={6}>
+                    {data.quizzes.length === 0 ? 'No quizzes yet. New quiz starts one from your content.' : 'No quizzes match. Clear the search or the filters.'}
                   </td>
                 </tr>
               )}
             </tbody>
           </table>
         </div>
+        <div className="qz-pager">
+          <Select aria-label="Rows per page" value={String(pageSize)} onChange={(event: { target: HTMLSelectElement }) => narrow(setPageSize, Number(event.target.value))}>
+            {PAGE_SIZES.map((size) => (
+              <option key={size} value={String(size)}>
+                {size} / page
+              </option>
+            ))}
+          </Select>
+          <span className="qz-pager-steps">
+            <button type="button" aria-label="Previous page" disabled={at === 0} onClick={() => setPage(at - 1)}>
+              ‹
+            </button>
+            <span>{rows.length === 0 ? 'No rows' : `${first}–${last} of ${rows.length}`}</span>
+            <button type="button" aria-label="Next page" disabled={at >= pages - 1} onClick={() => setPage(at + 1)}>
+              ›
+            </button>
+          </span>
+        </div>
       </Page>
-      {making === 'quiz' && <NewQuiz onClose={() => setMaking(null)} courses={data.courses} draws={[]} course={null} />}
+      {making === 'quiz' && <NewQuiz onClose={() => setMaking(null)} courses={data?.courses ?? []} draws={[]} course={null} />}
       {making === 'course' && <NewCourse onClose={() => setMaking(null)} />}
     </Surface>
   );
 }
 
 // ---- making things -------------------------------------------------------------------------------
+
+// What a quiz draws from, as pills, added from the project's blueprints or as a link or an asset path.
+function DrawsFrom({ sources, onChange, picks }: { sources: string[]; onChange: (next: string[]) => void; picks: Pickable | null }): JSX.Element {
+  const [link, setLink] = useState('');
+  return (
+    <Row gap="xs" wrap>
+      {sources.map((source) => (
+        <span className="qz-pill" key={source}>
+          {source}
+          <button aria-label={`Remove ${source}`} onClick={() => onChange(sources.filter((held) => held !== source))}>
+            ×
+          </button>
+        </span>
+      ))}
+      <span className="qz-add">
+        <Select aria-label="Add blueprint" value="" onChange={(event: { target: HTMLSelectElement }) => event.target.value && onChange([...sources, event.target.value])}>
+          <option value="" hidden>
+            Add blueprint…
+          </option>
+          {(picks?.blueprints ?? [])
+            .filter((held) => !sources.includes(held.id))
+            .map((held) => (
+              <option key={held.id} value={held.id}>
+                {held.id} {held.title}
+              </option>
+            ))}
+        </Select>
+      </span>
+      <Input
+        aria-label="Add a link or an asset path"
+        placeholder="Add a link or an asset path"
+        value={link}
+        onChange={(event: { target: HTMLInputElement }) => setLink(event.target.value)}
+        onKeyDown={(event: { key: string; preventDefault: () => void }) => {
+          if (event.key === 'Enter' && link.trim()) {
+            event.preventDefault();
+            onChange([...sources, link.trim()]);
+            setLink('');
+          }
+        }}
+      />
+    </Row>
+  );
+}
 
 export function NewQuiz({ onClose, courses, draws, course: startCourse }: { onClose: () => void; courses: Array<{ id: string; title: string }>; draws: string[]; course: string | null }): JSX.Element {
   const host = usePluginHost();
@@ -368,7 +650,6 @@ export function NewQuiz({ onClose, courses, draws, course: startCourse }: { onCl
   const [title, setTitle] = useState('');
   const [course, setCourse] = useState(startCourse ?? '');
   const [sources, setSources] = useState<string[]>(draws);
-  const [link, setLink] = useState('');
   const [start, setStart] = useState<'generate' | 'write'>('generate');
   const [count, setCount] = useState('20');
   const create = async (): Promise<void> => {
@@ -399,7 +680,7 @@ export function NewQuiz({ onClose, courses, draws, course: startCourse }: { onCl
         <div>
           <span className="qz-label">Course (optional)</span>
           <Select aria-label="Course" value={course} onChange={(event: { target: HTMLSelectElement }) => setCourse(event.target.value)}>
-            <option value="">None, a one-off</option>
+            <option value="">-</option>
             {courses.map((held) => (
               <option key={held.id} value={held.id}>
                 {held.title}
@@ -409,43 +690,7 @@ export function NewQuiz({ onClose, courses, draws, course: startCourse }: { onCl
         </div>
         <div>
           <span className="qz-label">Draws from</span>
-          <Row gap="xs" wrap>
-            {sources.map((source) => (
-              <span className="qz-pill" key={source}>
-                {source}
-                <button aria-label={`Remove ${source}`} onClick={() => setSources(sources.filter((held) => held !== source))}>
-                  ×
-                </button>
-              </span>
-            ))}
-            <span className="qz-add">
-              <Select aria-label="Add blueprint" value="" onChange={(event: { target: HTMLSelectElement }) => event.target.value && setSources([...sources, event.target.value])}>
-                <option value="" hidden>
-                  Add blueprint…
-                </option>
-                {(picks?.blueprints ?? [])
-                  .filter((held) => !sources.includes(held.id))
-                  .map((held) => (
-                    <option key={held.id} value={held.id}>
-                      {held.id} {held.title}
-                    </option>
-                  ))}
-              </Select>
-            </span>
-            <Input
-              aria-label="Add a link or an asset path"
-              placeholder="Add a link or an asset path"
-              value={link}
-              onChange={(event: { target: HTMLInputElement }) => setLink(event.target.value)}
-              onKeyDown={(event: { key: string; preventDefault: () => void }) => {
-                if (event.key === 'Enter' && link.trim()) {
-                  event.preventDefault();
-                  setSources([...sources, link.trim()]);
-                  setLink('');
-                }
-              }}
-            />
-          </Row>
+          <DrawsFrom sources={sources} onChange={setSources} picks={picks} />
         </div>
         <div>
           <span className="qz-label">How to start</span>
@@ -508,6 +753,248 @@ function NewCourse({ onClose }: { onClose: () => void }): JSX.Element {
   );
 }
 
+// ---- Get started ---------------------------------------------------------------------------------
+
+type StartScreen = 'what' | 'name' | 'content' | 'questions';
+const START_SCREENS: Array<{ key: StartScreen; label: string }> = [
+  { key: 'what', label: 'What to make' },
+  { key: 'name', label: 'Name it' },
+  { key: 'content', label: 'What it covers' },
+  { key: 'questions', label: 'Its questions' },
+];
+
+function Tile({ checked, name, hint, disabled, onClick }: { checked: boolean; name: string; hint: string; disabled?: boolean; onClick: () => void }): JSX.Element {
+  return (
+    <button type="button" role="radio" aria-checked={checked} className="qz-tile" disabled={disabled} onClick={onClick}>
+      <strong>{name}</strong>
+      <span className="qz-muted qz-small">{hint}</span>
+    </button>
+  );
+}
+
+// The tutorial a project with no quizzes lands on, and the menu keeps: the choices that make a first
+// quiz, as Backlog Setup asks its own. Nothing is written until the last screen's button.
+function GetStarted(): JSX.Element {
+  const host = usePluginHost();
+  const { data: picks } = useData<Pickable>('pickable');
+  const hasAgent = agentOf(host) !== undefined;
+  const [screen, setScreen] = useState<StartScreen>('what');
+  const [making, setMaking] = useState<'quiz' | 'course'>('quiz');
+  const [courseTitle, setCourseTitle] = useState('');
+  const [description, setDescription] = useState('');
+  const [title, setTitle] = useState('');
+  const [sources, setSources] = useState<string[]>([]);
+  const [way, setWay] = useState<'generate' | 'write'>(hasAgent ? 'generate' : 'write');
+  const [count, setCount] = useState('20');
+  const [madeCourse, setMadeCourse] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
+  useTrail([{ label: 'Quizzes', href: pageHref(host, '') }, { label: 'Get started' }]);
+  const firstField = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (screen === 'name') firstField.current?.focus();
+  }, [screen]);
+  const at = START_SCREENS.findIndex((held) => held.key === screen);
+  const named = title.trim() !== '' && (making === 'quiz' || courseTitle.trim() !== '');
+  const finish = async (): Promise<void> => {
+    setBusy(true);
+    setFailure(null);
+    try {
+      // a retry after the quiz failed does not make the course twice
+      let course = making === 'course' ? madeCourse : null;
+      if (making === 'course' && course === null) {
+        course = (await host.post<Course>('course', { title: courseTitle, description })).id;
+        setMadeCourse(course);
+      }
+      const quiz = await host.post<Quiz>('quiz', { title, draws_from: sources, course });
+      const asks = new URLSearchParams({ made: quiz.id, ...(course ? { course } : {}), ...(way === 'generate' ? { generate: count } : {}) });
+      host.navigate(`${pageHref(host, 'start')}?${asks.toString()}`);
+    } catch (cause) {
+      setFailure(cause instanceof Error ? cause.message : String(cause));
+      setBusy(false);
+    }
+  };
+  return (
+    <Surface>
+      <Page>
+        <div className="qz qz-start">
+          <header>
+            <h1 className="qz-start-title">Get started with Quizzes</h1>
+            <p className="qz-muted" style={{ margin: 0 }}>
+              A few choices make your first quiz. Every one can be changed afterward, and nothing is saved until the last step.
+            </p>
+          </header>
+          <ol className="qz-steps" aria-label="Steps of getting started">
+            {START_SCREENS.map((held, index) => (
+              <li key={held.key} data-state={index < at ? 'done' : index === at ? 'here' : 'ahead'} aria-current={index === at ? 'step' : undefined}>
+                <button type="button" disabled={index >= at || busy} onClick={() => setScreen(held.key)}>
+                  <span className="qz-step-mark">{index < at ? '✓' : index + 1}</span>
+                  <span>{held.label}</span>
+                </button>
+              </li>
+            ))}
+          </ol>
+          {failure && <Notice tone="error">{failure}</Notice>}
+          {screen === 'what' && (
+            <div className="qz-tiles" role="radiogroup" aria-label="What to make">
+              <Tile checked={making === 'quiz'} name="A quiz" hint="One quiz on your content, standing on its own." onClick={() => setMaking('quiz')} />
+              <Tile checked={making === 'course'} name="A course" hint="Quizzes in order. People enroll and follow their progress across them." onClick={() => setMaking('course')} />
+            </div>
+          )}
+          {screen === 'name' && (
+            <Stack gap="md">
+              {making === 'course' && (
+                <>
+                  <label>
+                    <span className="qz-label">The course's title</span>
+                    <Input ref={firstField} value={courseTitle} onChange={(event: { target: HTMLInputElement }) => setCourseTitle(event.target.value)} />
+                  </label>
+                  <label>
+                    <span className="qz-label">What it covers (optional)</span>
+                    <Textarea rows={2} value={description} onChange={(event: { target: HTMLTextAreaElement }) => setDescription(event.target.value)} />
+                  </label>
+                </>
+              )}
+              <label>
+                <span className="qz-label">{making === 'course' ? 'Its first quiz' : "The quiz's title"}</span>
+                <Input {...(making === 'quiz' ? { ref: firstField } : {})} value={title} onChange={(event: { target: HTMLInputElement }) => setTitle(event.target.value)} />
+              </label>
+            </Stack>
+          )}
+          {screen === 'content' && (
+            <div>
+              <span className="qz-label">Draws from: the blueprints, assets, and links its questions come from. You can add these later.</span>
+              <DrawsFrom sources={sources} onChange={setSources} picks={picks} />
+            </div>
+          )}
+          {screen === 'questions' && (
+            <Stack gap="md">
+              <div className="qz-tiles" role="radiogroup" aria-label="Its questions">
+                <Tile
+                  checked={way === 'generate'}
+                  name="Generate with AI"
+                  hint={hasAgent ? 'Your agent writes them from what the quiz draws from.' : 'Turn on the AI Agent plugin to generate questions.'}
+                  disabled={!hasAgent}
+                  onClick={() => setWay('generate')}
+                />
+                <Tile checked={way === 'write'} name="Write them myself" hint="Add each question, its options, its answer, and why." onClick={() => setWay('write')} />
+              </div>
+              {way === 'generate' && (
+                <label>
+                  <span className="qz-label">How many questions</span>
+                  <Input type="number" value={count} onChange={(event: { target: HTMLInputElement }) => setCount(event.target.value)} />
+                </label>
+              )}
+            </Stack>
+          )}
+          <Row gap="sm" wrap>
+            {at > 0 && (
+              <Button disabled={busy} onClick={() => setScreen(START_SCREENS[at - 1]!.key)}>
+                Back
+              </Button>
+            )}
+            <span style={{ flex: 1 }} />
+            {screen === 'questions' ? (
+              <Button variant="primary" disabled={busy} onClick={finish}>
+                {making === 'course' ? 'Create course' : 'Create quiz'}
+              </Button>
+            ) : (
+              <Button variant="primary" disabled={screen === 'name' && !named} onClick={() => setScreen(START_SCREENS[at + 1]!.key)}>
+                Continue
+              </Button>
+            )}
+          </Row>
+        </div>
+      </Page>
+    </Surface>
+  );
+}
+
+// What Get started closes on: what else there is, and the way to the questions.
+function StartClosing({ quiz, course, generate }: { quiz: string; course: string | null; generate: string | null }): JSX.Element {
+  const host = usePluginHost();
+  useTrail([{ label: 'Quizzes', href: pageHref(host, '') }, { label: 'Get started' }]);
+  const onCourse = course ? pageHref(host, `course/${Q(course)}`) : pageHref(host, '');
+  const items = [
+    { name: 'Proctors', hint: "People who can edit the quiz and see everyone's results.", to: pageHref(host, `quiz/${Q(quiz)}`) },
+    { name: course ? 'Your course' : 'Courses', hint: 'Quizzes in order, which people enroll in to follow their progress.', to: onCourse },
+    { name: 'Study plans', hint: '/study-plan in Chat has your agent write reading sessions.', to: onCourse },
+  ];
+  return (
+    <Surface>
+      <Page>
+        <div className="qz qz-start">
+          <header>
+            <h1 className="qz-start-title">Your quiz is ready for its questions</h1>
+            <p className="qz-muted" style={{ margin: 0 }}>
+              It opens to everyone as soon as it has a question. There is more here when you need it.
+            </p>
+          </header>
+          <div className="qz-tiles">
+            {items.map((item) => (
+              <Link key={item.name} className="qz-tile" to={item.to}>
+                <strong>{item.name}</strong>
+                <span className="qz-muted qz-small">{item.hint}</span>
+              </Link>
+            ))}
+          </div>
+          <Row justify="end">
+            <Button variant="primary" onClick={() => host.navigate(`${pageHref(host, `quiz/${Q(quiz)}/questions`)}${generate ? `?generate=${Q(generate)}` : ''}`)}>
+              {generate ? 'Generate your questions' : 'Write your questions'}
+            </Button>
+          </Row>
+        </div>
+      </Page>
+    </Surface>
+  );
+}
+
+// ---- my courses ------------------------------------------------------------------------------------
+
+function MyCourses(): JSX.Element {
+  const host = usePluginHost();
+  const { data, error } = useData<Overview>('overview');
+  useTrail([{ label: 'Quizzes', href: pageHref(host, '') }, { label: 'My courses' }]);
+  if (error) return <Failed message={error} />;
+  if (!data) return <Loading />;
+  const enrolled = data.courses.filter((course) => course.enrolled);
+  return (
+    <Surface>
+      <Page>
+        <div className="qz">
+          <h1 className="qz-h1" style={{ marginBottom: 18 }}>
+            My courses
+          </h1>
+          {enrolled.length === 0 && <Empty>You are not enrolled in a course. Open one and press Enroll to follow your progress across it.</Empty>}
+          {enrolled.map((course) => {
+            const quizzes = data.quizzes.filter((row) => row.course === course.id);
+            const taken = quizzes.filter((row) => row.best !== null);
+            const average = taken.length > 0 ? taken.reduce((sum, row) => sum + row.best!, 0) / taken.length : null;
+            return (
+              <div className="qz-card qz-quiz" key={course.id}>
+                <span style={{ flex: '1 1 240px', minWidth: 0 }}>
+                  <Link to={pageHref(host, `course/${Q(course.id)}`)} style={{ display: 'block', fontWeight: 600 }}>
+                    {course.title}
+                  </Link>
+                  <span className="qz-muted qz-small">
+                    {taken.length} of {quizzes.length} {quizzes.length === 1 ? 'quiz' : 'quizzes'} taken{average === null ? '' : `, average best ${asPercent(average)}`}
+                  </span>
+                  <div className="qz-progress" role="progressbar" aria-valuenow={taken.length} aria-valuemin={0} aria-valuemax={quizzes.length} aria-label={`Progress in ${course.title}`}>
+                    <div style={{ width: `${(taken.length / Math.max(1, quizzes.length)) * 100}%` }} />
+                  </div>
+                </span>
+                <Link className="qz-btn secondary" to={pageHref(host, `course/${Q(course.id)}/progress`)}>
+                  See my scores
+                </Link>
+              </div>
+            );
+          })}
+        </div>
+      </Page>
+    </Surface>
+  );
+}
+
 // ---- a course ---------------------------------------------------------------------------------------
 
 function LinkPills({ links, editable, onChange, label, picks }: { links: string[]; editable: boolean; onChange: (next: string[]) => void; label: string; picks: Pickable | null }): JSX.Element {
@@ -551,14 +1038,259 @@ function LinkPills({ links, editable, onChange, label, picks }: { links: string[
   );
 }
 
-function CoursePage({ id }: { id: string }): JSX.Element {
+// One enrolled person's way through a course: which quizzes they have taken, and every score.
+function ProgressDetail({ course, person }: { course: string; person: string | null }): JSX.Element {
+  const host = usePluginHost();
+  const { data, error } = useData<ProgressView>(`course/progress?id=${Q(course)}${person ? `&person=${Q(person)}` : ''}`);
+  const [open, setOpen] = useState<string[]>([]);
+  const [reviewing, setReviewing] = useState<{ quiz: string; attempt: string } | null>(null);
+  if (error) return <Notice tone="error">{error}</Notice>;
+  if (!data) return <Loading />;
+  const { progress } = data;
+  return (
+    <>
+      {!data.mine && (
+        <div className="qz-row" style={{ marginBottom: 12 }}>
+          <h2 className="qz-h2" style={{ margin: 0 }}>
+            {data.person.name}
+          </h2>
+          <span className="qz-muted qz-small">Enrolled {formatDate(data.enrolled_since)}</span>
+        </div>
+      )}
+      <div className="qz-stats">
+        <Stat hero label="Progress" value={`${progress.taken} of ${progress.of}`} sub="Quizzes taken officially" />
+        <Stat label="Average best" value={asPercent(progress.average_best)} sub="Across quizzes taken" />
+        <Stat
+          label="Last taken"
+          value={<span style={{ fontSize: 26 }}>{formatDate(progress.last_taken)}</span>}
+          sub={data.mine ? `Enrolled ${formatDate(data.enrolled_since)}` : 'An official attempt'}
+        />
+        {data.sessions > 0 && <Stat label="Study plan" value={`${data.sessions_done} of ${data.sessions}`} sub="Sessions done" />}
+      </div>
+      <div className="qz-scroll">
+        <table className="qz-table">
+          <thead>
+            <tr>
+              <th>Quiz</th>
+              <th className="num">Best</th>
+              <th className="num">Latest</th>
+              <th className="num">Attempts</th>
+              <th>Last taken</th>
+            </tr>
+          </thead>
+          <tbody>
+            {progress.quizzes.flatMap((row) => {
+              const showing = open.includes(row.id);
+              return [
+                <tr key={row.id}>
+                  <td>
+                    <span className="qz-badge accent" style={{ marginRight: 8 }}>
+                      {row.place}
+                    </span>
+                    <button className="qz-rowlink" onClick={() => host.navigate(pageHref(host, `quiz/${Q(row.id)}`))}>
+                      {row.title}
+                    </button>
+                    {row.status === 'closed' && (
+                      <>
+                        {' '}
+                        <span className="qz-badge">Closed</span>
+                      </>
+                    )}
+                  </td>
+                  <td className="num">{row.best === null ? <Text tone="faint">Not yet</Text> : asPercent(row.best)}</td>
+                  <td className="num">{row.latest === null ? <Text tone="faint">-</Text> : asPercent(row.latest)}</td>
+                  <td className="num">
+                    {row.attempts === 0 ? (
+                      <Text tone="faint">0</Text>
+                    ) : (
+                      <button
+                        className="qz-toggle"
+                        aria-expanded={showing}
+                        aria-label={`${row.attempts} ${row.attempts === 1 ? 'attempt' : 'attempts'} on ${row.title}`}
+                        onClick={() => setOpen(showing ? open.filter((held) => held !== row.id) : [...open, row.id])}
+                      >
+                        {row.attempts} {showing ? '▴' : '▾'}
+                      </button>
+                    )}
+                  </td>
+                  <td>{row.last_taken ? formatDate(row.last_taken) : <Text tone="faint">-</Text>}</td>
+                </tr>,
+                ...(showing
+                  ? [
+                      <tr className="qz-attempts-row" key={`${row.id}/attempts`}>
+                        <td colSpan={5}>
+                          {row.history.map((attempt) => (
+                            <div className="qz-attempt" key={attempt.id}>
+                              <span>{formatDate(attempt.completed_at)}</span>
+                              <span>
+                                {attempt.score}/{attempt.total} ({asPercent(attempt.percent)})
+                              </span>
+                              <button onClick={() => setReviewing({ quiz: row.id, attempt: attempt.id })}>Review answers</button>
+                            </div>
+                          ))}
+                        </td>
+                      </tr>,
+                    ]
+                  : []),
+              ];
+            })}
+            {progress.quizzes.length === 0 && (
+              <tr>
+                <td colSpan={5}>
+                  <Text tone="muted">This course has no quizzes yet.</Text>
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      <p className="qz-muted qz-small" style={{ marginTop: 8 }}>
+        Official attempts only. Practice stays on each person's machine and never counts here.
+      </p>
+      {reviewing && (
+        <AttemptModal quiz={reviewing.quiz} attempt={reviewing.attempt} title={data.mine ? 'Review' : data.person.name} {...(data.mine ? {} : { chose: 'Chose' })} onClose={() => setReviewing(null)} />
+      )}
+    </>
+  );
+}
+
+// Everyone enrolled in a course, each opening their ProgressDetail.
+function EnrolledTab({ course }: { course: string }): JSX.Element {
+  const host = usePluginHost();
+  const { data, error } = useData<RosterView>(`course/people?id=${Q(course)}`);
+  const [search, setSearch] = useState('');
+  if (error) return <Notice tone="error">{error}</Notice>;
+  if (!data) return <Loading />;
+  const words = search.toLowerCase().split(/\s+/).filter(Boolean);
+  const people = data.people.filter((person) => words.every((word) => `${person.name} ${person.alias}`.toLowerCase().includes(word)));
+  return (
+    <>
+      <div className="qz-stats">
+        <Stat hero label="Enrolled" value={data.people.length} sub={data.people.length === 1 ? 'Person in this course' : 'People in this course'} />
+        <Stat label="Average best" value={asPercent(data.average_best)} sub="Across people who have taken a quiz" />
+      </div>
+      <Input aria-label="Search people" placeholder="Search people" value={search} onChange={(event: { target: HTMLInputElement }) => setSearch(event.target.value)} />
+      <div className="qz-scroll" style={{ marginTop: 10 }}>
+        <table className="qz-table">
+          <thead>
+            <tr>
+              <th>Person</th>
+              <th>Progress</th>
+              <th className="num">Average best</th>
+              <th>Last taken</th>
+              <th>Enrolled</th>
+            </tr>
+          </thead>
+          <tbody>
+            {people.map((person) => (
+              <tr key={person.alias}>
+                <td>
+                  <button className="qz-rowlink" onClick={() => host.navigate(pageHref(host, `course/${Q(course)}/people/${Q(person.alias)}`))}>
+                    {person.name}
+                  </button>
+                </td>
+                <td>
+                  {person.taken} of {person.of}
+                  <div className="qz-progress qz-minibar" role="progressbar" aria-valuenow={person.taken} aria-valuemin={0} aria-valuemax={person.of} aria-label={`${person.name}'s progress`}>
+                    <div style={{ width: `${(person.taken / Math.max(1, person.of)) * 100}%` }} />
+                  </div>
+                </td>
+                <td className="num">{person.average_best === null ? <Text tone="faint">Not yet</Text> : asPercent(person.average_best)}</td>
+                <td>{person.last_taken ? formatDate(person.last_taken) : <Text tone="faint">-</Text>}</td>
+                <td>{formatDate(person.since)}</td>
+              </tr>
+            ))}
+            {people.length === 0 && (
+              <tr>
+                <td colSpan={5}>
+                  <Text tone="muted">{data.people.length === 0 ? 'Nobody has enrolled yet. People show here as they do.' : 'Nobody matches the search.'}</Text>
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </>
+  );
+}
+
+// Words edited where they stand: pressed, they become a field in the same type. Enter (⌘Enter over several lines)
+// or leaving the field saves, Escape puts them back, and to anyone who may not edit them they are plain words.
+function InlineText(props: {
+  value: string;
+  editable: boolean;
+  onSave: (value: string) => void;
+  label: string;
+  as: 'h1' | 'p';
+  className: string;
+  multiline?: boolean;
+  placeholder?: string;
+}): JSX.Element | null {
+  const { as: Tag, value, editable, onSave, multiline } = props;
+  const [draft, setDraft] = useState<string | null>(null);
+  const field = useRef<HTMLInputElement & HTMLTextAreaElement>(null);
+  const cancelled = useRef(false);
+  const editing = draft !== null;
+  // focused by hand: the page's autofocus takes only once a document
+  useEffect(() => {
+    if (!editing) return;
+    cancelled.current = false;
+    field.current?.focus();
+  }, [editing]);
+  if (draft === null) {
+    if (!editable) return value ? <Tag className={props.className}>{value}</Tag> : null;
+    return (
+      <Tag className={props.className}>
+        <button type="button" className="qz-inline" aria-label={`${props.label}: ${value || 'none'}. Press to edit`} onClick={() => setDraft(value)}>
+          {value || <span className="qz-inline-empty">{props.placeholder}</span>}
+        </button>
+      </Tag>
+    );
+  }
+  const finish = (): void => {
+    if (cancelled.current) return;
+    const next = draft.trim();
+    setDraft(null);
+    if (next !== value) onSave(next);
+  };
+  const shared = {
+    ref: field,
+    'aria-label': props.label,
+    className: `${props.className} qz-inline-field`,
+    value: draft,
+    placeholder: props.placeholder,
+    onBlur: finish,
+    onFocus: (event: { target: HTMLInputElement | HTMLTextAreaElement }) => event.target.select(),
+    onChange: (event: { target: HTMLInputElement | HTMLTextAreaElement }) => setDraft(event.target.value),
+    onKeyDown: (event: { key: string; metaKey: boolean; ctrlKey: boolean; preventDefault: () => void; currentTarget: HTMLElement }) => {
+      if (event.key === 'Escape') {
+        // nothing is saved as the field goes
+        cancelled.current = true;
+        setDraft(null);
+      } else if (event.key === 'Enter' && (!multiline || event.metaKey || event.ctrlKey)) {
+        event.preventDefault();
+        event.currentTarget.blur();
+      }
+    },
+  };
+  return multiline ? <textarea rows={Math.max(2, draft.split('\n').length)} {...shared} /> : <input {...shared} />;
+}
+
+function CoursePage({ id, tab, person }: { id: string; tab: string; person: string | null }): JSX.Element {
   const host = usePluginHost();
   const act = useAct();
   const { data, error, reload } = useData<CourseView>(`course?id=${Q(id)}`);
   const { data: picks } = useData<Pickable>('pickable');
   const { data: overview } = useData<Overview>('overview');
   const [adding, setAdding] = useState(false);
-  useTrail(data ? [{ label: 'Quizzes', href: pageHref(host, '') }, { label: data.course.title }] : null);
+  useTrail(
+    data
+      ? [
+          { label: 'Quizzes', href: pageHref(host, '') },
+          ...(person ? [{ label: data.course.title, href: pageHref(host, `course/${Q(id)}/people`) }, { label: `@${person}` }] : [{ label: data.course.title }]),
+        ]
+      : null,
+  );
   if (error) return <Failed message={error} />;
   if (!data) return <Loading />;
   const { course, quizzes, progress } = data;
@@ -577,6 +1309,27 @@ function CoursePage({ id }: { id: string }): JSX.Element {
       reload();
     });
   };
+  const enroll = (): void => {
+    void act('Could not enroll', async () => {
+      await host.post(`course/enroll?id=${Q(id)}`);
+      reload();
+    });
+  };
+  const leave = async (): Promise<void> => {
+    if (!(await host.dialog.confirm(`Leave ${course.title}? Your results stay, and enrolling again brings your progress back.`, { title: 'Leave course', ok: 'Leave' }))) return;
+    await act('Could not leave the course', async () => {
+      await host.del(`course/enroll?id=${Q(id)}`);
+      host.navigate(pageHref(host, `course/${Q(id)}`));
+      reload();
+    });
+  };
+  const enrolled = data.enrolled_since !== null;
+  const tabs: Array<{ name: string; label: string; show: boolean }> = [
+    { name: '', label: 'Quizzes', show: true },
+    { name: 'progress', label: 'My progress', show: enrolled },
+    { name: 'people', label: `Enrolled (${data.enrolled_people})`, show: data.may.people },
+  ];
+  const active = tabs.find((held) => held.name === tab && held.show)?.name ?? '';
   const remove = async (): Promise<void> => {
     if (!(await host.dialog.confirm(`Delete ${course.title}? Its ${quizzes.length} quizzes stay, as one-offs.`, { title: 'Delete course', ok: 'Delete', danger: true }))) return;
     await act('Could not delete the course', async () => {
@@ -590,21 +1343,38 @@ function CoursePage({ id }: { id: string }): JSX.Element {
         <div className="qz">
           <span className="qz-eyebrow">Course</span>
           <div className="qz-row" style={{ alignItems: 'flex-start' }}>
-            <h1 className="qz-h1" style={{ flex: '1 1 400px' }}>
-              {course.title}
-            </h1>
-            {data.may.edit && (
-              <>
-                <button className="qz-btn secondary" onClick={() => setAdding(true)}>
-                  Add quiz
-                </button>
-                <Button size="sm" variant="quiet" onClick={remove}>
-                  Delete
+            <div style={{ flex: '1 1 400px', minWidth: 0 }}>
+              <InlineText className="qz-h1" as="h1" label="The course's name" value={course.title} editable={data.may.edit} onSave={(title) => title.trim() !== '' && patch({ title })} />
+            </div>
+            <span className="qz-head-actions">
+              {enrolled && <span className="qz-badge good">Enrolled</span>}
+              {enrolled && (
+                <Button size="sm" variant="quiet" onClick={leave}>
+                  Leave course
                 </Button>
-              </>
-            )}
+              )}
+              {data.may.edit && (
+                <>
+                  <button className="qz-btn secondary" onClick={() => setAdding(true)}>
+                    Add quiz
+                  </button>
+                  <Button size="sm" variant="quiet" onClick={remove}>
+                    Delete
+                  </Button>
+                </>
+              )}
+            </span>
           </div>
-          {course.description && <p className="qz-muted">{course.description}</p>}
+          <InlineText
+            className="qz-course-description qz-muted"
+            as="p"
+            multiline
+            label="The course's description"
+            placeholder="Add a description"
+            value={course.description}
+            editable={data.may.edit}
+            onSave={(description) => patch({ description })}
+          />
           <dl className="qz-props">
             <dt>Content</dt>
             <dd>
@@ -622,58 +1392,130 @@ function CoursePage({ id }: { id: string }): JSX.Element {
               )}
             </dd>
             <dt>Created by</dt>
-            <dd>{course.created_by ? <UserPill alias={course.created_by} name={data.created_by_name} /> : <Text tone="faint">Unknown</Text>}</dd>
-          </dl>
-          <div className="qz-stats">
-            <Stat hero label="Your progress" value={`${progress.taken} of ${progress.of}`} sub="Quizzes taken officially" />
-            <Stat label="Your average best" value={asPercent(progress.average_best)} sub="Across quizzes taken" />
-            {progress.sessions > 0 && <Stat label="Study plan" value={`${progress.sessions_done} of ${progress.sessions}`} sub="Sessions done" />}
-          </div>
-          <h2 className="qz-h2">Quizzes, in order</h2>
-          {quizzes.length === 0 && <Empty>No quizzes in this course yet. Add quiz starts the first.</Empty>}
-          {quizzes.map((row, index) => (
-            <div className="qz-card qz-quiz" key={row.id}>
+            <dd>
+              {course.created_by ? <UserPill alias={course.created_by} name={data.created_by_name} /> : <Text tone="faint">Unknown</Text>}
               {data.may.edit && (
-                <span className="qz-move">
-                  <button aria-label={`Move ${row.title} up`} disabled={index === 0} onClick={() => move(index, index - 1)}>
-                    ▲
-                  </button>
-                  <button aria-label={`Move ${row.title} down`} disabled={index === quizzes.length - 1} onClick={() => move(index, index + 1)}>
-                    ▼
-                  </button>
+                <span className="qz-add">
+                  <Select aria-label="Change who created it" value="" onChange={(event: { target: HTMLSelectElement }) => event.target.value && patch({ created_by: event.target.value })}>
+                    <option value="" hidden>
+                      {course.created_by ? 'Change…' : 'Set creator…'}
+                    </option>
+                    {data.people
+                      .filter((person) => person.alias !== course.created_by)
+                      .map((person) => (
+                        <option key={person.alias} value={person.alias}>
+                          {person.name} (@{person.alias})
+                        </option>
+                      ))}
+                  </Select>
                 </span>
               )}
-              <span className="qz-badge accent">{index + 1}</span>
-              <span style={{ flex: '1 1 240px', minWidth: 0 }}>
-                <Link to={pageHref(host, `quiz/${Q(row.id)}`)} style={{ display: 'block', fontWeight: 600 }}>
-                  {row.title}
-                </Link>
-                <span className="qz-muted qz-small">
-                  {row.questions} questions{row.draws_from.length > 0 ? `, draws from ${row.draws_from.join(' and ')}` : ''}
-                </span>
-              </span>
-              <span className="qz-badge">{row.best === null ? 'Not yet' : `Best ${asPercent(row.best)}`}</span>
-              {row.status === 'closed' ? (
-                <span className="qz-badge">Closed</span>
-              ) : (
-                <Link className={`qz-btn${row.best === null ? '' : ' secondary'}`} to={pageHref(host, `quiz/${Q(row.id)}`)}>
-                  {row.best === null ? 'Take' : 'Retake'}
-                </Link>
-              )}
-            </div>
-          ))}
-          <p className="qz-muted qz-small">The order suggests a path. Anyone can take any quiz at any time.</p>
-          {data.sessions.length > 0 && (
+            </dd>
+          </dl>
+          {tabs.filter((held) => held.show).length > 1 && (
+            <nav className="qz-tabs">
+              {tabs
+                .filter((held) => held.show)
+                .map((held) => (
+                  <Link key={held.name} className="qz-tab" to={pageHref(host, `course/${Q(id)}${held.name ? `/${held.name}` : ''}`)} aria-current={held.name === active ? 'page' : undefined}>
+                    {held.label}
+                  </Link>
+                ))}
+            </nav>
+          )}
+          {active === 'progress' && <ProgressDetail course={id} person={null} />}
+          {active === 'people' &&
+            (person ? (
+              <>
+                <p style={{ margin: '0 0 12px' }}>
+                  <Link className="qz-link qz-small" to={pageHref(host, `course/${Q(id)}/people`)}>
+                    ← Everyone enrolled
+                  </Link>
+                </p>
+                <ProgressDetail key={person} course={id} person={person} />
+              </>
+            ) : (
+              <EnrolledTab course={id} />
+            ))}
+          {active === '' && (
             <>
-              <h2 className="qz-h2">Study plan</h2>
-              {data.sessions.map((session) => (
-                <div className="qz-row" key={session.id} style={{ padding: '6px 0' }}>
-                  <a className="qz-link" href={host.hrefs.blueprint(session.rel)}>
-                    {session.title}
-                  </a>
-                  <span className="qz-badge">{session.done ? 'Done' : 'Not yet'}</span>
+              {enrolled ? (
+                <div className="qz-stats">
+                  <Stat
+                    hero
+                    label="Your progress"
+                    value={`${progress.taken} of ${progress.of}`}
+                    sub={
+                      <Link className="qz-link" to={pageHref(host, `course/${Q(id)}/progress`)}>
+                        See your scores
+                      </Link>
+                    }
+                  />
+                  <Stat label="Your average best" value={asPercent(progress.average_best)} sub="Across quizzes taken" />
+                  {progress.sessions > 0 && <Stat label="Study plan" value={`${progress.sessions_done} of ${progress.sessions}`} sub="Sessions done" />}
+                </div>
+              ) : (
+                <div className="qz-card qz-enroll">
+                  <div className="qz-row">
+                    <strong>Track your progress</strong>
+                    <button className="qz-btn" disabled={!data.may.enroll} title={data.may.enroll_why ?? undefined} onClick={enroll}>
+                      Enroll
+                    </button>
+                  </div>
+                  <div className="qz-muted qz-small" style={{ marginTop: 4 }}>
+                    Follow your scores across every quiz in this course{progress.taken > 0 ? `, starting with the ${progress.taken === 1 ? 'one' : progress.taken} you have taken` : ''}. You can take
+                    any quiz without enrolling. Enrolling shows your scores in this course to its creator, its quizzes' creators and proctors, and the project's owners.
+                  </div>
+                </div>
+              )}
+              <h2 className="qz-h2">Quizzes, in order</h2>
+              {quizzes.length === 0 && <Empty>No quizzes in this course yet. Add quiz starts the first.</Empty>}
+              {quizzes.map((row, index) => (
+                <div className="qz-card qz-quiz" key={row.id}>
+                  {data.may.edit && (
+                    <span className="qz-move">
+                      <button aria-label={`Move ${row.title} up`} disabled={index === 0} onClick={() => move(index, index - 1)}>
+                        ▲
+                      </button>
+                      <button aria-label={`Move ${row.title} down`} disabled={index === quizzes.length - 1} onClick={() => move(index, index + 1)}>
+                        ▼
+                      </button>
+                    </span>
+                  )}
+                  <span className="qz-badge accent">{index + 1}</span>
+                  <span style={{ flex: '1 1 240px', minWidth: 0 }}>
+                    <Link to={pageHref(host, `quiz/${Q(row.id)}`)} style={{ display: 'block', fontWeight: 600 }}>
+                      {row.title}
+                    </Link>
+                    <span className="qz-muted qz-small">
+                      {row.questions} {row.questions === 1 ? 'question' : 'questions'}
+                      {row.draws_from.length > 0 ? `, draws from ${row.draws_from.join(' and ')}` : ''}
+                    </span>
+                  </span>
+                  <span className="qz-badge">{row.best === null ? 'Not yet' : `Best ${asPercent(row.best)}`}</span>
+                  {row.status === 'closed' ? (
+                    <span className="qz-badge">Closed</span>
+                  ) : (
+                    <Link className={`qz-btn${row.best === null ? '' : ' secondary'}`} to={pageHref(host, `quiz/${Q(row.id)}`)}>
+                      {row.best === null ? 'Take' : 'Retake'}
+                    </Link>
+                  )}
                 </div>
               ))}
+              <p className="qz-muted qz-small">The order suggests a path. Anyone can take any quiz at any time.</p>
+              {data.sessions.length > 0 && (
+                <>
+                  <h2 className="qz-h2">Study plan</h2>
+                  {data.sessions.map((session) => (
+                    <div className="qz-row" key={session.id} style={{ padding: '6px 0' }}>
+                      <a className="qz-link" href={host.hrefs.blueprint(session.rel)}>
+                        {session.title}
+                      </a>
+                      <span className="qz-badge">{session.done ? 'Done' : 'Not yet'}</span>
+                    </div>
+                  ))}
+                </>
+              )}
             </>
           )}
         </div>
@@ -1115,7 +1957,7 @@ function Builder({ view, generate, reload }: { view: QuizView; generate: string 
       </Row>
       {generate && quiz.questions.length === 0 && (
         <div style={{ marginTop: 12 }}>
-          <Notice>Press Generate questions to have your agent write them in Chat. They appear here as it adds them. The quiz stays closed until you open it.</Notice>
+          <Notice>Press Generate questions to have your agent write them in Chat. They appear here as it adds them, and your agent opens the quiz once the last one is in.</Notice>
         </div>
       )}
       {mode === 'source' ? (
@@ -1334,7 +2176,7 @@ function QuizPage({ id, tab, generate }: { id: string; tab: string; generate: st
                 <dt>Course</dt>
                 <dd>
                   <Select aria-label="Course" value={quiz.course ?? ''} onChange={(event: { target: HTMLSelectElement }) => patch({ course: event.target.value || null })}>
-                    <option value="">None, a one-off</option>
+                    <option value="">-</option>
                     {(overview?.courses ?? []).map((held) => (
                       <option key={held.id} value={held.id}>
                         {held.title}
@@ -1356,6 +2198,11 @@ function QuizPage({ id, tab, generate }: { id: string; tab: string; generate: st
                 >
                   {quiz.status === 'open' ? 'Close quiz' : 'Open quiz'}
                 </Button>
+              )}
+              {may.edit && data.askable === 0 && !quiz.closed && (
+                <Text tone="faint" size="sm">
+                  Opens as soon as it has a question
+                </Text>
               )}
             </dd>
             <dt>Draws from</dt>
@@ -1722,8 +2569,13 @@ function BesideBlueprint(): JSX.Element {
 // ---- the page half --------------------------------------------------------------------------------------------------
 
 function Route({ segments, query }: { segments: string[]; query: URLSearchParams }): JSX.Element {
-  const [kind, id, tab] = segments.map((segment) => decodeURIComponent(segment));
-  if (kind === 'course' && id) return <CoursePage key={id} id={id} />;
+  const [kind, id, tab, person] = segments.map((segment) => decodeURIComponent(segment));
+  if (kind === 'start') {
+    const made = query.get('made');
+    return made ? <StartClosing quiz={made} course={query.get('course')} generate={query.get('generate')} /> : <GetStarted />;
+  }
+  if (kind === 'my-courses') return <MyCourses />;
+  if (kind === 'course' && id) return <CoursePage key={id} id={id} tab={tab ?? ''} person={person ?? null} />;
   if (kind === 'quiz' && id) return <QuizPage key={id} id={id} tab={tab ?? ''} generate={query.get('generate')} />;
   if (kind === 'take' && id) {
     const wanted = query.get('kind') === 'official' ? 'official' : 'practice';

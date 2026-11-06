@@ -2,9 +2,11 @@
 
 Build multiple-choice quizzes on your project's content, take them locally to practice or officially for the record, and keep every score over time. A plugin for [Eidos MD](https://eidosmd.com) from The Virtual Panda.
 
+- **Get started in a few steps.** A project with no quizzes opens on a short tutorial that makes your first quiz or course.
 - **Build a quiz** from any blueprint, asset, or link. Your own AI agent generates the questions, you regenerate the ones you don't like, or you write them yourself. Each question has its answer and the reason why.
-- **Open it when it's ready.** A new quiz starts closed, and you can try it out before opening it to everyone.
+- **Open as soon as it has a question.** A quiz opens to everyone with its first question, and you can close it to keep working on it, trying it out yourself meanwhile.
 - **Group quizzes into courses**, in order, or keep a quiz as a one-off.
+- **Enroll in a course** to follow your progress across it: which quizzes you have taken and every score. Anyone can enroll, a course's creator and proctors too, and the people who run a course see how everyone enrolled is doing.
 - **Practice locally, then take it officially.** Practice stays on your machine. An official attempt is committed with the project and kept in your history.
 - **See your scores over time**, and how you compare with the quiz's average. The quiz's creator, the proctors they add, and the project's owners see everyone's results, down to each answer.
 - **Add a study plan if you want one.** `/study-plan` has your agent write reading sessions for a book, a textbook, or online content, as ordinary blueprints in your project.
@@ -27,7 +29,7 @@ eidos plugin allow quizzes
 | -------------------------------- | ----------------------------------------- | ----------------- |
 | One-off quizzes                  | `quizzes/<title>.md`                      | Committed         |
 | A course and its quizzes         | `quizzes/<course>/`                       | Committed         |
-| Official attempts                | `.eidos/plugins/quizzes/results/<alias>/` | Committed         |
+| Official attempts, enrollments   | `.eidos/plugins/quizzes/results/<alias>/` | Committed         |
 | Practice attempts                | `.eidos/plugins/quizzes/local/`           | This machine only |
 | Lessons, wiki pages, study plans | Your project's own collections            | Yours             |
 

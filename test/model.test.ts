@@ -1,7 +1,25 @@
 // The pure work: a quiz's file reads back as it was written, and every sum a page shows.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { accessOf, canEdit, canManage, canSeeResults, compare, everyone, makeAttempt, myScores, parseQuestions, parseQuiz, practiceSets, renderQuiz, type Attempt, type Quiz } from '../src/model.ts';
+import {
+  accessOf,
+  canEdit,
+  canManage,
+  canSeeCourse,
+  canSeeResults,
+  compare,
+  courseProgress,
+  everyone,
+  makeAttempt,
+  myScores,
+  parseQuestions,
+  parseQuiz,
+  practiceSets,
+  renderQuiz,
+  statusOf,
+  type Attempt,
+  type Quiz,
+} from '../src/model.ts';
 
 const quiz: Quiz = {
   id: 'Q-AAAA',
@@ -10,6 +28,7 @@ const quiz: Quiz = {
   created_by: 'ada',
   proctors: ['bo'],
   status: 'closed',
+  closed: true,
   rank: 2,
   course: null,
   path: 'quizzes/a-quiz.md',
@@ -26,6 +45,23 @@ function attempt(by: string, score: number, total: number, at: string, kind: Att
 test("a quiz's file reads back as it was written", () => {
   const read = parseQuiz(renderQuiz(quiz), quiz.path, null);
   assert.deepEqual(read, quiz);
+});
+
+test('a quiz is open once it has a question to ask, unless a person closed it', () => {
+  const question = quiz.questions[0]!;
+  assert.equal(statusOf({ closed: false, questions: [] }), 'closed', 'nothing to ask');
+  assert.equal(statusOf({ closed: false, questions: [{ ...question, answer: null }] }), 'closed', 'a question with no answer cannot be asked');
+  assert.equal(statusOf({ closed: false, questions: [question] }), 'open');
+  assert.equal(statusOf({ closed: true, questions: [question] }), 'closed');
+});
+
+test('the file says closed only when a person closed it, and an older status: open still reads', () => {
+  const open = { ...quiz, closed: false, status: 'open' as const };
+  assert.ok(!renderQuiz(open).includes('status:'));
+  assert.equal(parseQuiz(renderQuiz(open), quiz.path, null).status, 'open');
+  const older = renderQuiz(open).replace('id: Q-AAAA', 'id: Q-AAAA\nstatus: open');
+  assert.deepEqual([parseQuiz(older, quiz.path, null).status, parseQuiz(older, quiz.path, null).closed], ['open', false]);
+  assert.match(renderQuiz(quiz), /status: closed/);
 });
 
 test('a question with nothing marked reads as having no answer', () => {
@@ -95,6 +131,49 @@ test('everyone lists each person with their attempts, newest taken first', () =>
   assert.equal(people[0]!.attempts, 2);
   assert.equal(people[0]!.latest, 0.8);
   assert.equal(people[0]!.best, 0.8);
+});
+
+test("a person's progress lists every quiz of the course in order, with only their own official scores", () => {
+  const quizzes = [
+    { id: 'Q-1', title: 'One', status: 'open' as const },
+    { id: 'Q-2', title: 'Two', status: 'closed' as const },
+    { id: 'Q-3', title: 'Three', status: 'open' as const },
+  ];
+  const on = (quiz: string, by: string, score: number, at: string): Attempt => ({ ...attempt(by, score, 10, at), quiz, id: `${quiz}-${by}-${at}` });
+  const progress = courseProgress(
+    quizzes,
+    [on('Q-1', 'ada', 5, '2026-01-01'), on('Q-1', 'ada', 8, '2026-01-03'), on('Q-1', 'ada', 7, '2026-01-04'), on('Q-3', 'ada', 6, '2026-01-02'), on('Q-2', 'bo', 10, '2026-01-09')],
+    'ada',
+  );
+  assert.deepEqual([progress.taken, progress.of], [2, 3]);
+  assert.ok(Math.abs(progress.average_best! - 0.7) < 1e-9, 'the average of each quiz taken at its best');
+  assert.equal(progress.last_taken, '2026-01-04');
+  assert.deepEqual(
+    progress.quizzes.map((row) => [row.place, row.id, row.attempts, row.latest, row.best]),
+    [
+      [1, 'Q-1', 3, 0.7, 0.8],
+      [2, 'Q-2', 0, null, null],
+      [3, 'Q-3', 1, 0.6, 0.6],
+    ],
+  );
+  assert.equal(progress.quizzes[0]!.history[0]!.completed_at, '2026-01-04', 'newest first');
+  const none = courseProgress(quizzes, [], 'cy');
+  assert.deepEqual([none.taken, none.average_best, none.last_taken], [0, null, null]);
+});
+
+test("a course's people go to its creator, its quizzes' creators and proctors, and owners", () => {
+  const course = { created_by: 'ada' };
+  const quizzes = [
+    { created_by: 'bo', proctors: ['cy'] },
+    { created_by: null, proctors: [] },
+  ];
+  assert.ok(canSeeCourse(course, quizzes, { alias: 'ada', owner: false }));
+  assert.ok(canSeeCourse(course, quizzes, { alias: 'bo', owner: false }));
+  assert.ok(canSeeCourse(course, quizzes, { alias: 'cy', owner: false }));
+  assert.ok(canSeeCourse(course, quizzes, { alias: 'own', owner: true }));
+  assert.ok(!canSeeCourse(course, quizzes, { alias: 'di', owner: false }), 'a quiz with no creator opens that quiz, not the course');
+  assert.ok(!canSeeCourse(course, quizzes, null));
+  assert.ok(canSeeCourse({ created_by: null }, [], { alias: 'di', owner: false }), "a course with no creator is anyone's");
 });
 
 test('no user selected, or no owner marked, is full access', () => {

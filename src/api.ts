@@ -5,6 +5,8 @@ import {
   askable,
   canEdit,
   canManage,
+  canSeeCourse,
+  courseProgress,
   parseQuiz,
   renderQuiz,
   canSeeResults,
@@ -38,6 +40,8 @@ export interface QuizRow {
   created_by_name: string | null;
   status: QuizStatus;
   best: number | null;
+  may_edit: boolean;
+  may_manage: boolean;
 }
 
 export type Api = ReturnType<typeof makeApi>;
@@ -86,12 +90,24 @@ export function makeApi(host: Host) {
         created_by: quiz.created_by,
         created_by_name: nameOf(quiz.created_by),
         best: bestOf(quiz.id, me?.alias ?? null, official),
+        may_edit: canEdit(quiz, store.access()),
+        may_manage: canManage(quiz, store.access()),
       };
     });
   };
 
   const requireEdit = (thing: { created_by: string | null }, what: string): void => {
     if (!canEdit(thing, store.access())) throw new HostError(403, `only ${what}'s creator, its proctors, and the project's owners change it`);
+  };
+
+  const quizzesOf = (course: Course): Quiz[] => store.list().quizzes.filter((quiz) => quiz.course === course.id);
+  const mayWatch = (course: Course): boolean => canSeeCourse(course, quizzesOf(course), store.access());
+
+  const progressFor = (course: Course, alias: string) => {
+    const progress = courseProgress(quizzesOf(course), store.officialAttempts(), alias);
+    const sessions = store.blueprintsOf(course.study_plan);
+    const done = store.sessionsDone(alias);
+    return { progress, sessions_done: sessions.filter((session) => done[session.id]).length, sessions: sessions.length };
   };
 
   const validated = (question: Question): Question => {
@@ -113,7 +129,15 @@ export function makeApi(host: Host) {
         me: me ? { name: me.name, alias: me.alias, owner: me.owner } : null,
         folder: store.folderName(),
         quizzes: rows(),
-        courses: store.list().courses.map((course) => ({ id: course.id, title: course.title, created_by: course.created_by })),
+        courses: store
+          .list()
+          .courses.map((course) => ({
+            id: course.id,
+            title: course.title,
+            created_by: course.created_by,
+            enrolled: me?.alias ? Boolean(store.enrollmentsOf(me.alias)[course.id]) : false,
+            may_edit: canEdit(course, store.access()),
+          })),
       };
     },
 
@@ -172,8 +196,13 @@ export function makeApi(host: Host) {
       const me = store.me();
       const own = myAttempts(quiz.id, me?.alias ?? null).find((attempt) => attempt.id === attemptId);
       if (own) return own;
-      if (!canSeeResults(quiz, store.access())) throw new HostError(403, "another person's answers are shown to the quiz's creator, its proctors, and the project's owners");
       const found = store.officialAttempts(quiz.id).find((attempt) => attempt.id === attemptId);
+      if (!canSeeResults(quiz, store.access())) {
+        // someone who follows a course sees the answers of the people enrolled in it
+        const course = store.list().courses.find((held) => held.id === quiz.course);
+        if (!found || !course || !mayWatch(course) || !store.enrollmentsOf(found.by)[course.id])
+          throw new HostError(403, "another person's answers are shown to the quiz's creator, its proctors, and the project's owners");
+      }
       if (!found) throw new HostError(404, `no attempt ${attemptId} on this quiz`);
       return found;
     },
@@ -227,14 +256,14 @@ export function makeApi(host: Host) {
       }
       const next: Quiz = {
         ...quiz,
-        ...(patch.status ? { status: patch.status } : {}),
+        ...(patch.status ? { closed: patch.status === 'closed' } : {}),
         ...(patch.title !== undefined ? { title: patch.title.trim() || quiz.title } : {}),
         ...(patch.draws_from ? { draws_from: patch.draws_from } : {}),
         ...(patch.proctors ? { proctors: patch.proctors } : {}),
         ...(patch.created_by !== undefined ? { created_by: patch.created_by } : {}),
       };
       await store.saveQuiz(next);
-      return next;
+      return store.quiz(id);
     },
 
     async saveQuestion(id: string, question: Question) {
@@ -300,10 +329,17 @@ export function makeApi(host: Host) {
       const taken = quizzes.filter((row) => row.best !== null);
       const sessions = store.blueprintsOf(course.study_plan);
       const done = alias ? store.sessionsDone(alias) : {};
+      const enrolled = store.enrolledIn(course.id);
       return {
         course,
         created_by_name: nameOf(course.created_by),
-        may: { edit: canEdit(course, store.access()) },
+        may: { edit: canEdit(course, store.access()), people: mayWatch(course), enroll: store.cannotSign('Enrolling') === null, enroll_why: store.cannotSign('Enrolling') },
+        enrolled_since: enrolled.find((person) => person.alias === alias)?.since ?? null,
+        enrolled_people: enrolled.length,
+        people: store
+          .people()
+          .filter((person) => !person.agent && person.alias)
+          .map((person) => ({ alias: person.alias!, name: person.name })),
         quizzes,
         progress: {
           taken: taken.length,
@@ -315,6 +351,53 @@ export function makeApi(host: Host) {
         content: store.blueprintsOf(course.content),
         sessions: sessions.map((session) => ({ ...session, done: Boolean(done[session.id]) })),
       };
+    },
+
+    // ---- enrolling, and a person's way through a course ----
+
+    // Anyone may enroll, a course's creator and its proctors too (Quizzes REQ41).
+    async enroll(id: string) {
+      const course = store.course(id);
+      const person = store.signer('Enrolling');
+      await store.setEnrolled(person.alias!, course.id, true);
+      return { course: course.id, alias: person.alias!, enrolled: true };
+    },
+
+    // Leaving keeps every result: it only stops the course following them.
+    async leave(id: string) {
+      const course = store.course(id);
+      const alias = store.me()?.alias;
+      if (!alias) throw new HostError(400, 'pick who you are in the project to leave a course');
+      await store.setEnrolled(alias, course.id, false);
+      return { course: course.id, alias, enrolled: false };
+    },
+
+    // One enrolled person's quizzes and scores: your own, or anyone's for those REQ43 names.
+    courseProgress(id: string, person?: string | null) {
+      const course = store.course(id);
+      const me = store.me()?.alias ?? null;
+      const alias = person || me;
+      if (alias !== me && !mayWatch(course)) throw new HostError(403, "another person's progress is shown to the course's creator, its quizzes' creators and proctors, and the project's owners");
+      if (!alias) throw new HostError(400, 'pick who you are in the project to see your progress');
+      const since = store.enrollmentsOf(alias)[course.id];
+      if (!since)
+        throw new HostError(404, alias === me ? `you are not enrolled in ${course.title}; eidos quizzes course enroll ${course.id} enrolls you` : `@${alias} is not enrolled in ${course.title}`);
+      return { course: { id: course.id, title: course.title }, person: { alias, name: nameOf(alias) ?? alias }, mine: alias === me, enrolled_since: since, ...progressFor(course, alias) };
+    },
+
+    // Everyone enrolled in a course, each with their progress, for those REQ43 names.
+    courseRoster(id: string) {
+      const course = store.course(id);
+      if (!mayWatch(course)) throw new HostError(403, "who enrolled in a course is shown to its creator, its quizzes' creators and proctors, and the project's owners");
+      const people = store
+        .enrolledIn(course.id)
+        .map(({ alias, since }) => {
+          const { progress, sessions_done, sessions } = progressFor(course, alias);
+          return { alias, name: nameOf(alias) ?? alias, since, taken: progress.taken, of: progress.of, average_best: progress.average_best, last_taken: progress.last_taken, sessions_done, sessions };
+        })
+        .sort((a, b) => a.name.localeCompare(b.name));
+      const scored = people.flatMap((person) => person.average_best ?? []);
+      return { people, average_best: scored.length > 0 ? scored.reduce((sum, best) => sum + best, 0) / scored.length : null };
     },
 
     async createCourse(input: { title: string; description?: string; content?: string[]; study_plan?: string[] }): Promise<Course> {

@@ -39,6 +39,10 @@ const entry: AppEntry<Api> = {
     host.route('PUT', 'course', (request) => api.updateCourse(need(request, 'id'), request.body as Parameters<Api['updateCourse']>[1]));
     host.route('DELETE', 'course', (request) => api.removeCourse(need(request, 'id')));
     host.route('PUT', 'course/order', (request) => api.reorderCourse(need(request, 'id'), request.body['ids'] as string[]));
+    host.route('POST', 'course/enroll', (request) => api.enroll(need(request, 'id')));
+    host.route('DELETE', 'course/enroll', (request) => api.leave(need(request, 'id')));
+    host.route('GET', 'course/progress', (request) => api.courseProgress(need(request, 'id'), request.query.get('person')));
+    host.route('GET', 'course/people', (request) => api.courseRoster(need(request, 'id')));
 
     host.route('GET', 'blueprint', (request) => api.forBlueprint(need(request, 'id')));
     host.route('PUT', 'session', async (request) => {

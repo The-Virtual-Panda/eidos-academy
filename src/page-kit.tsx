@@ -1,7 +1,7 @@
 // What the quiz's own pages are drawn with. The list and the builder use the host's kit;
 // a quiz, a course, its scores, and a result take Bible Academy's look (Quizzes REQ36),
 // a surface of the plugin's own, styled only with the page's tokens so a theme holds.
-import { useCallback, useEffect, useState, type JSX, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type JSX, type ReactNode } from 'react';
 import { Notice, SkeletonBar, Stack, useCrumbs, useFileChanges, usePluginHost, type Crumb, type PluginHost } from 'eidosmd/page';
 
 export const CSS = `
@@ -56,7 +56,6 @@ export const CSS = `
 .qz-table th, .qz-table td { padding: 10px 6px; border-bottom: 1px solid var(--color-line); text-align: left; font-variant-numeric: tabular-nums; }
 .qz-table th { color: var(--color-muted); font-size: var(--text-xs); font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
 .qz-table .num { text-align: right; }
-.qz-table button.qz-sort { padding: 0; border: 0; background: none; color: inherit; font: inherit; letter-spacing: inherit; text-transform: inherit; cursor: pointer; }
 .qz-table button.qz-rowlink { padding: 0; border: 0; background: none; color: inherit; font: inherit; font-weight: 500; text-align: left; cursor: pointer; }
 .qz-table button.qz-rowlink:hover { color: var(--color-accent); }
 .qz-tabs { display: flex; gap: 2px; margin-bottom: 18px; overflow: auto hidden; box-shadow: inset 0 -1px 0 var(--color-line); font-size: var(--text-base); }
@@ -102,6 +101,77 @@ export const CSS = `
 .qz-key { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; }
 .qz-key input[type=radio] { flex: none; width: 16px; height: 16px; accent-color: var(--color-ok); }
 .qz-aux { padding: 0 12px 12px; font-size: var(--text-base); }
+.qz-enroll { margin-bottom: 18px; }
+.qz-head-actions { display: inline-flex; flex: none; align-items: center; gap: 8px; }
+.qz-inline { display: block; width: 100%; margin: -2px -6px; padding: 2px 6px; box-sizing: content-box; border: 0; border-radius: var(--radius-md); background: none; color: inherit; font: inherit; letter-spacing: inherit; line-height: inherit; text-align: left; white-space: pre-wrap; cursor: text; }
+.qz-inline:hover { background: var(--color-hover); }
+.qz-inline-empty { color: var(--color-faint); }
+.qz-inline-field { display: block; width: 100%; margin-top: -2px; margin-bottom: 4px; margin-left: -6px; padding: 2px 6px; box-sizing: content-box; border: 0; border-radius: var(--radius-md); outline: 2px solid var(--color-accent); background: var(--color-raised); color: var(--color-fg); font-family: inherit; resize: vertical; }
+.qz-course-description { margin: 0 0 14px; line-height: 1.6; }
+.qz-menu { position: fixed; z-index: 1000; min-width: 180px; padding: 4px; border: 1px solid var(--color-line); border-radius: var(--radius-lg); background: var(--color-raised); box-shadow: var(--shadow-popover); font-size: var(--text-base); white-space: nowrap; }
+.qz-menu button { display: block; width: 100%; padding: 6px 10px; border: 0; border-radius: var(--radius-md); background: none; color: var(--color-fg); font: inherit; text-align: left; cursor: pointer; }
+.qz-menu button:hover, .qz-menu button:focus-visible { background: var(--color-hover); outline: none; }
+.qz-menu button[data-danger] { color: var(--color-error); }
+.qz-menu hr { height: 1px; margin: 4px 0; border: 0; background: var(--color-line); }
+.qz-filters { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+.qz-filters-top { display: flex; align-items: center; gap: 6px; }
+.qz-filters-top > [data-slot=button] { width: 30px; height: 30px; padding: 0; }
+.qz-filters-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.qz-search { position: relative; display: inline-flex; align-items: center; width: 220px; max-width: 100%; }
+.qz-search > svg { position: absolute; left: 10px; color: var(--color-faint); pointer-events: none; }
+.qz-search input { padding: 5px 26px 5px 28px; }
+.qz-search input::-webkit-search-cancel-button { appearance: none; }
+.qz-search[data-set] input { border-color: var(--color-accent); background: var(--color-accent-soft); }
+.qz-search > button { position: absolute; right: 4px; display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; padding: 0; border: 0; border-radius: var(--radius-sm); background: none; color: var(--color-muted); cursor: pointer; }
+.qz-search > button:hover { background: var(--color-hover); color: var(--color-fg); }
+.qz-dt-wrap { overflow: auto; border: 1px solid var(--color-line); border-radius: var(--radius-xl); background: var(--color-raised); }
+.qz-dt { width: 100%; border-collapse: separate; border-spacing: 0; font-size: var(--text-base); }
+.qz-dt th { position: sticky; top: 0; z-index: 1; padding: 8px 12px; border-right: 1px solid color-mix(in srgb, var(--color-line) 60%, transparent); border-bottom: 1px solid var(--color-line); background: var(--color-sunken); color: var(--color-faint); font-size: var(--text-xs); font-weight: 500; letter-spacing: .05em; text-align: left; text-transform: uppercase; white-space: nowrap; user-select: none; }
+.qz-dt th:last-child, .qz-dt td:last-child { border-right: 0; }
+.qz-dt th:hover { color: var(--color-fg); }
+.qz-dt th[role=button] { cursor: pointer; }
+.qz-dt-dir { margin-left: 4px; color: var(--color-accent); font-size: var(--text-xs); }
+.qz-dt td { max-width: 380px; padding: 7px 12px; overflow: hidden; border-right: 1px solid color-mix(in srgb, var(--color-line) 60%, transparent); border-bottom: 1px solid var(--color-line); text-overflow: ellipsis; vertical-align: middle; white-space: nowrap; }
+.qz-dt tbody tr:last-child td { border-bottom: 0; }
+.qz-dt tbody tr:hover td { background: var(--color-hover); }
+.qz-dt tbody tr { cursor: pointer; }
+.qz-dt td[data-cell=title] { min-width: 200px; color: var(--color-fg); font-weight: 500; white-space: normal; }
+.qz-dt button.qz-rowlink { padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.qz-dt-id { color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-xs); font-weight: 400; }
+.qz-dt-link { color: var(--color-accent); text-decoration: none; }
+.qz-dt-link:hover { text-decoration: underline; }
+.qz-dt td.qz-dt-empty { padding: 22px 12px; color: var(--color-faint); text-align: center; white-space: normal; cursor: default; }
+.qz-pager { display: flex; align-items: center; justify-content: flex-end; gap: 6px; margin-top: 10px; }
+.qz-pager-steps { display: inline-flex; align-items: center; overflow: hidden; border: 1px solid var(--color-line); border-radius: var(--radius-lg); background: var(--color-raised); }
+.qz-pager-steps button { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 0; border: 0; background: none; color: inherit; font: inherit; cursor: pointer; }
+.qz-pager-steps button:hover:not(:disabled) { background: var(--color-hover); }
+.qz-pager-steps button:disabled { opacity: .5; cursor: default; }
+.qz-pager-steps span { padding: 0 12px; border-right: 1px solid var(--color-line); border-left: 1px solid var(--color-line); color: var(--color-muted); font-size: var(--text-sm); line-height: 28px; white-space: nowrap; }
+.qz-start { display: flex; flex-direction: column; gap: 16px; max-width: 760px; }
+.qz-start-title { margin: 0 0 4px; font-size: var(--text-2xl); font-weight: 600; }
+.qz-steps { display: flex; align-items: center; gap: 2px; margin: 0; padding: 0; overflow-x: auto; list-style: none; }
+.qz-steps li { display: flex; flex: none; align-items: center; gap: 2px; }
+.qz-steps li + li::before { content: ""; width: 18px; height: 1px; background: var(--color-line-strong); }
+.qz-steps button { display: inline-flex; align-items: center; gap: 8px; height: 30px; padding: 0 12px 0 5px; border: 0; border-radius: 999px; background: none; color: var(--color-faint); font: inherit; font-size: var(--text-base); }
+.qz-steps button:not(:disabled) { cursor: pointer; }
+.qz-steps button:not(:disabled):hover { background: var(--color-hover); }
+.qz-steps li[data-state=done] button { color: var(--color-muted); }
+.qz-steps li[data-state=here] button { background: var(--color-accent-soft); color: var(--color-fg); font-weight: 600; }
+.qz-step-mark { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; border: 1px solid var(--color-line-strong); border-radius: 50%; font-size: var(--text-xs); font-weight: 600; }
+.qz-steps li[data-state=done] .qz-step-mark { border-color: var(--color-accent); color: var(--color-accent); }
+.qz-steps li[data-state=here] .qz-step-mark { border-color: var(--color-accent); background: var(--color-accent); color: var(--color-on-accent); }
+.qz-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px; }
+.qz-tile { display: flex; flex-direction: column; gap: 4px; min-width: 0; padding: 14px; border: 1px solid var(--color-line); border-radius: var(--radius-xl); background: var(--color-raised); color: var(--color-fg); font: inherit; text-align: left; cursor: pointer; }
+.qz-tile:hover:not(:disabled) { border-color: var(--color-line-strong); background: var(--color-hover); }
+.qz-tile[aria-checked=true], .qz-tile[aria-checked=true]:hover { border-color: var(--color-accent); background: var(--color-accent-soft); box-shadow: 0 0 0 1px var(--color-accent); }
+.qz-tile:disabled { opacity: .5; cursor: default; }
+.qz-minibar { width: 90px; height: 6px; margin: 4px 0 0; }
+.qz-attempts-row td { padding: 0 6px 10px 34px; }
+.qz-attempt { display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: baseline; padding: 4px 0; font-size: var(--text-sm); }
+.qz-attempt > span:first-child { min-width: 64px; color: var(--color-muted); }
+.qz-attempt button { padding: 0; border: 0; background: none; color: var(--color-accent); font: inherit; cursor: pointer; }
+.qz-attempt button:hover { text-decoration: underline; }
+.qz-table button.qz-toggle { display: inline-flex; gap: 4px; padding: 0; border: 0; background: none; color: var(--color-accent); font: inherit; cursor: pointer; }
 @media (max-width: 760px) { .qz-h1 { font-size: 26px; } .qz-score { font-size: 68px; } .qz-prompt { font-size: var(--text-2xl); } .qz-qlist { max-width: none; } }
 `;
 
@@ -186,6 +256,67 @@ export function UserPill({ alias, name, children }: { alias: string; name?: stri
       <span className={me ? 'qz-me' : undefined}>{shown}</span>
       {children}
     </span>
+  );
+}
+
+export interface MenuEntry {
+  label: string;
+  run: () => void | Promise<void>;
+  danger?: boolean;
+  // a line before it, setting its group apart
+  rule?: boolean;
+}
+
+// A row's menu at the pointer, as the page's own is (the kit does not hand a plugin its RowMenu yet).
+// It closes on a pick, a press outside it, or Escape, and the arrow keys walk it.
+export function ContextMenu({ x, y, items, onClose }: { x: number; y: number; items: MenuEntry[]; onClose: () => void }): JSX.Element {
+  const held = useRef<HTMLDivElement>(null);
+  const [at, setAt] = useState({ x, y });
+  useLayoutEffect(() => {
+    const box = held.current?.getBoundingClientRect();
+    if (!box) return;
+    // kept on the screen, whichever corner of it the press was in
+    setAt({ x: Math.max(4, Math.min(x, window.innerWidth - box.width - 4)), y: Math.max(4, Math.min(y, window.innerHeight - box.height - 4)) });
+    held.current?.querySelector('button')?.focus();
+  }, [x, y]);
+  useEffect(() => {
+    const press = (event: MouseEvent): void => {
+      if (!held.current?.contains(event.target as Node)) onClose();
+    };
+    const key = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') onClose();
+      if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+      event.preventDefault();
+      const rows = [...(held.current?.querySelectorAll('button') ?? [])];
+      const from = rows.indexOf(document.activeElement as HTMLButtonElement);
+      rows[(from + (event.key === 'ArrowDown' ? 1 : rows.length - 1)) % rows.length]?.focus();
+    };
+    window.addEventListener('mousedown', press);
+    window.addEventListener('keydown', key);
+    return () => {
+      window.removeEventListener('mousedown', press);
+      window.removeEventListener('keydown', key);
+    };
+  }, [onClose]);
+  return (
+    <div ref={held} className="qz-menu" role="menu" style={{ left: at.x, top: at.y }} onContextMenu={(event) => event.preventDefault()}>
+      {items.map((item) => (
+        <div key={item.label}>
+          {item.rule && <hr />}
+          <button
+            type="button"
+            role="menuitem"
+            data-danger={item.danger || undefined}
+            onClick={() => {
+              onClose();
+              void item.run();
+            }}
+          >
+            {item.label}
+          </button>
+        </div>
+      ))}
+    </div>
   );
 }
 

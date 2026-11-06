@@ -23,8 +23,10 @@ export interface Quiz {
   draws_from: string[];
   created_by: string | null;
   proctors: string[];
-  // closed, nobody can take it: a quiz starts closed and opens when it is ready
+  // as it stands: open, unless a person closed it or it has no question to ask yet (statusOf)
   status: QuizStatus;
+  // a person closed it, so it stays closed however many questions it has; all the file says
+  closed: boolean;
   // its place in its course
   rank: number;
   // the course's id, from the folder it sits in; null for a one-off
@@ -203,16 +205,19 @@ export function parseQuiz(source: string, path: string, course: string | null): 
   const { data, body } = splitFrontmatter(source);
   const id = text(data['id']).trim();
   if (!id) throw new Error('it has no id');
+  const closed = data['status'] === 'closed';
+  const questions = parseQuestions(body);
   return {
     id,
     title: text(data['title']).trim() || 'Untitled quiz',
     draws_from: strings(data['draws_from']),
     created_by: text(data['created_by']).trim() || null,
     proctors: strings(data['proctors']),
-    status: data['status'] === 'closed' ? 'closed' : 'open',
+    status: statusOf({ closed, questions }),
+    closed,
     rank: typeof data['rank'] === 'number' ? data['rank'] : Number.MAX_SAFE_INTEGER,
     course,
-    questions: parseQuestions(body),
+    questions,
     path,
   };
 }
@@ -225,7 +230,7 @@ export function renderQuiz(quiz: Quiz): string {
       draws_from: quiz.draws_from,
       created_by: quiz.created_by,
       proctors: quiz.proctors,
-      status: quiz.status,
+      status: quiz.closed ? 'closed' : null,
       rank: quiz.rank === Number.MAX_SAFE_INTEGER ? null : quiz.rank,
     },
     renderQuestions(quiz.questions),
@@ -243,8 +248,13 @@ export function questionProblems(question: Question): string[] {
   return problems;
 }
 
-export function askable(quiz: Quiz): Question[] {
+export function askable(quiz: Pick<Quiz, 'questions'>): Question[] {
   return quiz.questions.filter((question) => questionProblems(question).length === 0);
+}
+
+// A quiz is open by default once it has a question to ask (Quizzes REQ40).
+export function statusOf(quiz: Pick<Quiz, 'closed' | 'questions'>): QuizStatus {
+  return quiz.closed || askable(quiz).length === 0 ? 'closed' : 'open';
 }
 
 // ---- a course's file -----------------------------------------------------------------
@@ -429,6 +439,58 @@ export function everyone(official: Attempt[]): PersonResult[] {
     .sort((a, b) => b.last_taken.localeCompare(a.last_taken));
 }
 
+// One person's way through a course's quizzes, in the course's order, from their official
+// attempts. The attempts taken before they enrolled count: they are the same person's scores.
+export interface CourseQuizProgress {
+  id: string;
+  title: string;
+  place: number;
+  status: QuizStatus;
+  attempts: number;
+  latest: number | null;
+  best: number | null;
+  last_taken: string | null;
+  // newest first
+  history: PersonResult['history'];
+}
+
+export interface CourseProgress {
+  taken: number;
+  of: number;
+  average_best: number | null;
+  last_taken: string | null;
+  quizzes: CourseQuizProgress[];
+}
+
+export function courseProgress(quizzes: Array<Pick<Quiz, 'id' | 'title' | 'status'>>, official: Attempt[], alias: string): CourseProgress {
+  const rows = quizzes.map((quiz, index) => {
+    const result = everyone(official.filter((attempt) => attempt.quiz === quiz.id && attempt.by === alias))[0];
+    return {
+      id: quiz.id,
+      title: quiz.title,
+      place: index + 1,
+      status: quiz.status,
+      attempts: result?.attempts ?? 0,
+      latest: result?.latest ?? null,
+      best: result?.best ?? null,
+      last_taken: result?.last_taken ?? null,
+      history: result?.history ?? [],
+    };
+  });
+  const taken = rows.filter((row) => row.attempts > 0);
+  return {
+    taken: taken.length,
+    of: rows.length,
+    average_best: taken.length > 0 ? taken.reduce((sum, row) => sum + row.best!, 0) / taken.length : null,
+    last_taken:
+      taken
+        .map((row) => row.last_taken!)
+        .sort()
+        .at(-1) ?? null,
+    quizzes: rows,
+  };
+}
+
 // May this person see everyone's results (Quizzes REQ21), or change the quiz (REQ10, REQ22)?
 export interface Person {
   alias: string | null;
@@ -448,6 +510,16 @@ export function canSeeResults(quiz: Pick<Quiz, 'created_by' | 'proctors'>, perso
   // made while nobody was known, it has no creator to keep it from anyone
   if (person.owner || quiz.created_by === null) return true;
   return person.alias !== null && (person.alias === quiz.created_by || quiz.proctors.includes(person.alias));
+}
+
+// May this person see who enrolled in a course and each one's scores across it (Quizzes REQ43)?
+// A quiz with no known creator opens that quiz to everyone, never the whole course, so only a
+// person the course's quizzes actually name counts here.
+export function canSeeCourse(course: Pick<Course, 'created_by'>, quizzes: Array<Pick<Quiz, 'created_by' | 'proctors'>>, person: Person | null): boolean {
+  if (!person) return false;
+  if (person.owner || course.created_by === null) return true;
+  const alias = person.alias;
+  return alias !== null && (alias === course.created_by || quizzes.some((quiz) => alias === quiz.created_by || quiz.proctors.includes(alias)));
 }
 
 // Change the quiz: its questions, its title, what it draws from, and its course.

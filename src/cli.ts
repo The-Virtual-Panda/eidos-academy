@@ -96,12 +96,13 @@ const entry: CliEntry = {
         .option('--course <course>', "the course's id; absent, a one-off")
         .option('--place <n>', 'its place in the course, from 1; absent, last')
         .option('--created-by <alias>', 'who created it; absent, you')
-        .option('--open', 'open it at once; absent, it starts closed until it is ready')
+        .option('--closed', 'keep it closed until someone opens it; absent, it opens as soon as it has a question')
+        .option('--open', 'the default, kept so a script that passes it still runs')
         .option('--json', 'the quiz')
-        .action(async (title: string, options: { drawsFrom: string[]; course?: string; place?: string; createdBy?: string; open?: boolean }, command: Options) => {
+        .action(async (title: string, options: { drawsFrom: string[]; course?: string; place?: string; createdBy?: string; closed?: boolean }, command: Options) => {
           await run(command, async (json) => {
             const quiz = await store.createQuiz({
-              ...(options.open ? { status: 'open' as const } : {}),
+              ...(options.closed ? { closed: true } : {}),
               title,
               draws_from: options.drawsFrom,
               course: options.course ? store.course(options.course).id : null,
@@ -151,7 +152,7 @@ const entry: CliEntry = {
               for (const alias of options.addProctor) if (!known.has(alias)) throw new HostError(400, `${alias} is not in the project's users; eidos users lists them`);
               await store.saveQuiz({
                 ...quiz,
-                ...(options.status ? { status: options.status as 'open' | 'closed' } : {}),
+                ...(options.status ? { closed: options.status === 'closed' } : {}),
                 ...(options.title ? { title: options.title } : {}),
                 ...(options.createdBy ? { created_by: options.createdBy } : {}),
                 draws_from: [...new Set([...quiz.draws_from.filter((source) => !options.removeSource.includes(source)), ...options.addSource])],
@@ -268,11 +269,68 @@ const entry: CliEntry = {
         .command('show')
         .argument('<course>', "the course's id")
         .description('one course, with its quizzes in order and your progress')
-        .option('--json', '{ course, quizzes[], progress, content[], sessions[] }')
+        .option('--json', '{ course, enrolled_since, quizzes[], progress, content[], sessions[] }')
         .action(async (id: string, _options: unknown, command: Options) => {
           await run(command, (json) => {
             const shown = api.course(id);
             say(json, shown, [renderCourse(shown.course).trimEnd(), '', ...shown.quizzes.map((row) => `${row.place}. ${row.id}  ${row.title}  ·  best ${asPercent(row.best)}`)].join('\n'));
+          });
+        });
+      course
+        .command('enroll')
+        .argument('<course>', "the course's id")
+        .description('enroll in a course, to follow your scores across it; anyone may, its creator and proctors too')
+        .option('--json', '{ course, alias, enrolled }')
+        .action(async (id: string, _options: unknown, command: Options) => {
+          await run(command, async (json) => {
+            const done = await api.enroll(id);
+            say(json, done, `@${done.alias} is enrolled in ${done.course}`);
+          });
+        });
+      course
+        .command('leave')
+        .argument('<course>', "the course's id")
+        .description('leave a course; your results stay')
+        .option('--json', '{ course, alias, enrolled }')
+        .action(async (id: string, _options: unknown, command: Options) => {
+          await run(command, async (json) => {
+            const done = await api.leave(id);
+            say(json, done, `@${done.alias} is no longer enrolled in ${done.course}; their results stay`);
+          });
+        });
+      course
+        .command('progress')
+        .argument('<course>', "the course's id")
+        .description('an enrolled person: which quizzes they have taken, and their scores')
+        .option('--person <alias>', "someone else's, if the course's results are yours to see; absent, yours")
+        .option('--json', '{ course, person, mine, enrolled_since, progress: { taken, of, average_best, last_taken, quizzes[] }, sessions_done, sessions }')
+        .action(async (id: string, options: { person?: string }, command: Options) => {
+          await run(command, (json) => {
+            const shown = api.courseProgress(id, options.person);
+            const { progress } = shown;
+            const lines = [
+              `${shown.person.name} in ${shown.course.title}: ${progress.taken} of ${progress.of} quizzes taken, average best ${asPercent(progress.average_best)}`,
+              ...progress.quizzes.map(
+                (row) => `${row.place}. ${row.id}  ${row.title}  ·  ${row.attempts === 0 ? 'not yet' : `${row.attempts} attempts, latest ${asPercent(row.latest)}, best ${asPercent(row.best)}`}`,
+              ),
+            ];
+            say(json, shown, lines.join('\n'));
+          });
+        });
+      course
+        .command('people')
+        .argument('<course>', "the course's id")
+        .description("everyone enrolled in a course and their progress, if the course's results are yours to see")
+        .option('--json', '{ people[], average_best }')
+        .action(async (id: string, _options: unknown, command: Options) => {
+          await run(command, (json) => {
+            const roster = api.courseRoster(id);
+            say(
+              json,
+              roster,
+              roster.people.map((person) => `${person.alias}  ${person.name}  ·  ${person.taken} of ${person.of} quizzes taken, average best ${asPercent(person.average_best)}`).join('\n') ||
+                'nobody has enrolled yet',
+            );
           });
         });
       course

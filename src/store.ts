@@ -6,25 +6,10 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, s
 import path from 'node:path';
 import { HostError, type Host } from 'eidosmd/plugin';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
-import {
-  accessOf,
-  drawId,
-  parseAttempt,
-  parseCourse,
-  parseQuiz,
-  renderAttempt,
-  renderCourse,
-  renderQuiz,
-  slugify,
-  type Attempt,
-  type Course,
-  type Person,
-  type Question,
-  type Quiz,
-  type QuizStatus,
-} from './model.ts';
+import { accessOf, drawId, parseAttempt, parseCourse, parseQuiz, renderAttempt, renderCourse, renderQuiz, slugify, type Attempt, type Course, type Person, type Question, type Quiz } from './model.ts';
 
 export const COURSE_FILE = 'course.md';
+const ENROLLMENTS_FILE = 'enrollments.yaml';
 // who a practice attempt is by while no user is selected
 export const LOCAL_PERSON = 'local';
 
@@ -186,24 +171,24 @@ export class Store {
     );
   }
 
-  // Why this person can't sign an official attempt, or null when they can.
-  cannotSign(): string | null {
+  // Why this person can't sign an official attempt or an enrollment, or null when they can.
+  cannotSign(what: 'An official attempt' | 'Enrolling' = 'An official attempt'): string | null {
     const me = this.me();
-    if (me?.agent) return 'Only people take quizzes';
+    if (me?.agent) return what === 'Enrolling' ? 'Only people enroll in a course' : 'Only people take quizzes';
     if (me?.alias || this.gitIdentity()) return null;
-    return 'An official attempt needs a name: pick who you are in the project, or set your git name';
+    return `${what} needs a name: pick who you are in the project, or set your git name`;
   }
 
-  // Who signs an official attempt: the person acting, added to the project's users the
-  // first time they need to be (Quizzes REQ18).
-  signer(): ProjectPerson {
+  // Who signs an official attempt or an enrollment: the person acting, added to the project's
+  // users the first time they need to be (Quizzes REQ18).
+  signer(what: 'An official attempt' | 'Enrolling' = 'An official attempt'): ProjectPerson {
     const me = this.me();
     if (me) {
-      if (me.agent) throw new HostError(403, 'only people take quizzes, so an agent has no official attempts');
+      if (me.agent) throw new HostError(403, what === 'Enrolling' ? 'only people enroll in a course, so an agent has no progress' : 'only people take quizzes, so an agent has no official attempts');
       if (me.alias) return me;
     }
     const identity = this.gitIdentity();
-    if (!identity) throw new HostError(400, 'an official attempt needs a name: pick who you are in the project, or set your git name');
+    if (!identity) throw new HostError(400, `${what.toLowerCase()} needs a name: pick who you are in the project, or set your git name`);
     const { user } = this.host.addPerson({ name: identity.name, email: identity.email });
     if (!user.alias) throw new HostError(400, `${user.name} has no alias to sign an attempt with; give them one in the project's users`);
     return { name: user.name, alias: user.alias, owner: user.owner === true, agent: false };
@@ -241,7 +226,7 @@ export class Store {
     return Math.max(0, ...quizzes.map((quiz) => quiz.rank)) + 1;
   }
 
-  async createQuiz(input: { status?: QuizStatus; title: string; draws_from?: string[]; course?: string | null; created_by?: string | null; rank?: number | null }): Promise<Quiz> {
+  async createQuiz(input: { closed?: boolean; title: string; draws_from?: string[]; course?: string | null; created_by?: string | null; rank?: number | null }): Promise<Quiz> {
     const title = input.title.trim();
     if (!title) throw new HostError(400, 'a quiz needs a title');
     const listed = this.list();
@@ -255,7 +240,9 @@ export class Store {
       draws_from: input.draws_from ?? [],
       created_by: input.created_by === undefined ? (this.me()?.alias ?? null) : input.created_by,
       proctors: [],
-      status: input.status ?? 'closed',
+      // nothing to ask yet, whatever the file comes to say
+      status: 'closed',
+      closed: input.closed ?? false,
       rank: this.nextRank(course),
       course,
       questions: [],
@@ -363,7 +350,7 @@ export class Store {
       const held = path.join(folder, person);
       if (!statSync(held).isDirectory()) continue;
       for (const name of listDir(held)) {
-        if (!name.endsWith('.yaml') || name === 'sessions.yaml') continue;
+        if (!name.endsWith('.yaml') || name === 'sessions.yaml' || name === ENROLLMENTS_FILE) continue;
         try {
           attempts.push(parseAttempt(readFileSync(path.join(held, name), 'utf8')));
         } catch {
@@ -402,6 +389,36 @@ export class Store {
     const folder = path.join(this.host.workspace, 'local', 'results', attempt.by);
     mkdirSync(folder, { recursive: true });
     writeFileSync(path.join(folder, `${attempt.id}.yaml`), renderAttempt(attempt));
+  }
+
+  // ---- enrollments -------------------------------------------------------------------
+
+  // A person's own file beside their attempts, so two people enrolling never conflict
+  // (Quizzes REQ41): the courses they are in, each with when they enrolled.
+  enrollmentsOf(alias: string): Record<string, string> {
+    try {
+      const held = parseYaml(readFileSync(path.join(this.host.workspace, 'results', alias, ENROLLMENTS_FILE), 'utf8')) as { courses?: Record<string, string> } | null;
+      return held?.courses ?? {};
+    } catch {
+      return {};
+    }
+  }
+
+  // Everyone in a course, read from each person's own file.
+  enrolledIn(course: string): Array<{ alias: string; since: string }> {
+    const folder = path.join(this.host.workspace, 'results');
+    return listDir(folder).flatMap((alias) => {
+      const since = this.enrollmentsOf(alias)[course];
+      return since ? [{ alias, since }] : [];
+    });
+  }
+
+  async setEnrolled(alias: string, course: string, enrolled: boolean): Promise<void> {
+    const held = this.enrollmentsOf(alias);
+    if (enrolled === Boolean(held[course])) return;
+    if (enrolled) held[course] = new Date().toISOString();
+    else delete held[course];
+    await this.host.writeFile(`${this.workspaceRel}/results/${alias}/${ENROLLMENTS_FILE}`, stringifyYaml({ courses: held }));
   }
 
   // ---- study sessions ----------------------------------------------------------------
