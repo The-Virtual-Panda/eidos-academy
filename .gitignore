@@ -1,2 +1,5 @@
 node_modules/
 dist/
+
+# a local trial on real course content: its project and app data, never committed, since the lessons are not ours to publish
+trial/

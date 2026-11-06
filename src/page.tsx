@@ -30,7 +30,7 @@ import {
   type PagePlugin,
   type PluginHost,
 } from 'eidosmd/page';
-import { asPercent, Delta, Failed, formatDate, HelpMark, LaptopMark, Loading, Stat, Surface, useAct, useData } from './page-kit.tsx';
+import { asPercent, Delta, Failed, formatDate, HelpMark, LaptopMark, Loading, Stat, Surface, useAct, useData, UserPill } from './page-kit.tsx';
 import type { Attempt, AttemptKind, AttemptMode, Comparison, Course, MyScores, PersonResult, Question, Quiz } from './model.ts';
 
 // ---- what the routes answer ------------------------------------------------------------
@@ -45,6 +45,7 @@ interface Row_ {
   draws_from: string[];
   questions: number;
   created_by: string | null;
+  created_by_name: string | null;
   status: 'open' | 'closed';
   best: number | null;
 }
@@ -56,6 +57,8 @@ interface Overview {
 }
 interface QuizView {
   quiz: Quiz;
+  created_by_name: string | null;
+  proctor_names: Record<string, string | null>;
   askable: number;
   course: { id: string; title: string } | null;
   place: number | null;
@@ -72,6 +75,7 @@ interface Pickable {
 }
 interface CourseView {
   course: Course;
+  created_by_name: string | null;
   may: { edit: boolean };
   quizzes: Row_[];
   progress: { taken: number; of: number; average_best: number | null; sessions_done: number; sessions: number };
@@ -335,7 +339,7 @@ function QuizList({ show }: { show: string | null }): JSX.Element {
                   </td>
                   <td>{row.draws_from.join(', ') || <Text tone="faint">Nothing yet</Text>}</td>
                   <td className="num">{row.questions}</td>
-                  <td>{row.created_by ? `@${row.created_by}` : <Text tone="faint">Unknown</Text>}</td>
+                  <td>{row.created_by ? <UserPill alias={row.created_by} name={row.created_by_name} /> : <Text tone="faint">Unknown</Text>}</td>
                   <td className="num">{row.best === null ? <Text tone="faint">Not yet</Text> : asPercent(row.best)}</td>
                 </tr>
               ))}
@@ -619,7 +623,7 @@ function CoursePage({ id }: { id: string }): JSX.Element {
               )}
             </dd>
             <dt>Created by</dt>
-            <dd>{course.created_by ? `@${course.created_by}` : <Text tone="faint">Unknown</Text>}</dd>
+            <dd>{course.created_by ? <UserPill alias={course.created_by} name={data.created_by_name} /> : <Text tone="faint">Unknown</Text>}</dd>
           </dl>
           <div className="qz-stats">
             <Stat hero label="Your progress" value={`${progress.taken} of ${progress.of}`} sub="Quizzes taken officially" />
@@ -1367,19 +1371,22 @@ function QuizPage({ id, tab, generate }: { id: string; tab: string; generate: st
             </dd>
             <dt>Created by</dt>
             <dd>
-              {may.manage ? (
-                <Select aria-label="Created by" value={quiz.created_by ?? ''} onChange={(event: { target: HTMLSelectElement }) => patch({ created_by: event.target.value || null })}>
-                  {quiz.created_by === null && <option value="">Unknown</option>}
-                  {data.people.map((person) => (
-                    <option key={person.alias} value={person.alias}>
-                      @{person.alias}
+              {quiz.created_by ? <UserPill alias={quiz.created_by} name={data.created_by_name} /> : <Text tone="faint">Unknown</Text>}
+              {may.manage && (
+                <span className="qz-add">
+                  <Select aria-label="Change who created it" value="" onChange={(event: { target: HTMLSelectElement }) => event.target.value && patch({ created_by: event.target.value })}>
+                    <option value="" hidden>
+                      {quiz.created_by ? 'Change…' : 'Set creator…'}
                     </option>
-                  ))}
-                </Select>
-              ) : quiz.created_by ? (
-                `@${quiz.created_by}`
-              ) : (
-                <Text tone="faint">Unknown</Text>
+                    {data.people
+                      .filter((person) => person.alias !== quiz.created_by)
+                      .map((person) => (
+                        <option key={person.alias} value={person.alias}>
+                          {person.name} (@{person.alias})
+                        </option>
+                      ))}
+                  </Select>
+                </span>
               )}
             </dd>
             {may.results && (
@@ -1389,14 +1396,13 @@ function QuizPage({ id, tab, generate }: { id: string; tab: string; generate: st
                 </dt>
                 <dd>
                   {quiz.proctors.map((alias) => (
-                    <span className="qz-pill" key={alias}>
-                      @{alias}
+                    <UserPill key={alias} alias={alias} name={data.proctor_names[alias]}>
                       {may.manage && (
                         <button aria-label={`Remove @${alias}`} onClick={() => patch({ proctors: quiz.proctors.filter((held) => held !== alias) })}>
                           ×
                         </button>
                       )}
-                    </span>
+                    </UserPill>
                   ))}
                   {!may.manage && quiz.proctors.length === 0 && <Text tone="faint">None</Text>}
                   {may.manage && (

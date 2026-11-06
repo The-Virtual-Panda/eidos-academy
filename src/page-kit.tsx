@@ -75,6 +75,9 @@ export const CSS = `
 .qz-add [aria-haspopup=listbox]:hover { border-color: var(--color-line); }
 .qz-help { display: inline-flex; vertical-align: -2px; color: var(--color-faint); cursor: help; }
 .qz-help:hover, .qz-help:focus-visible { color: var(--color-fg); }
+.qz-user { padding-left: 3px; }
+.qz-avatar { display: inline-flex; flex: none; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 50%; background: var(--color-accent-soft); color: var(--color-accent-strong); font-size: var(--text-3xs); font-weight: 700; }
+.qz-me { color: var(--color-accent-strong); font-weight: 600; }
 .qz-bars { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; align-items: end; height: 150px; }
 .qz-bar { display: flex; flex-direction: column; justify-content: flex-end; gap: 4px; height: 100%; color: var(--color-muted); font-size: var(--text-sm); text-align: center; }
 .qz-bar i { display: block; min-height: 2px; border-radius: 4px 4px 0 0; background: var(--color-line-strong); }
@@ -153,6 +156,30 @@ export function HelpMark({ tip }: { tip: string }): JSX.Element {
         <circle cx="8" cy="8" r="6.5" />
         <path d="M6.2 6.2a1.9 1.9 0 1 1 2.7 1.7c-.6.3-.9.7-.9 1.3M8 11.6h.01" />
       </svg>
+    </span>
+  );
+}
+
+const initialsOf = (name: string): string =>
+  name
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((word) => word[0]!.toUpperCase())
+    .join('');
+
+// A person as the page's own pills draw one: their initials in a round mark, then their name, in the accent when it is you.
+export function UserPill({ alias, name, children }: { alias: string; name?: string | null | undefined; children?: ReactNode }): JSX.Element {
+  const host = usePluginHost();
+  const shown = name ?? alias;
+  const me = host.user?.alias === alias;
+  return (
+    <span className="qz-pill qz-user" title={`@${alias}`}>
+      <span className="qz-avatar" aria-hidden="true">
+        {initialsOf(shown)}
+      </span>
+      <span className={me ? 'qz-me' : undefined}>{shown}</span>
+      {children}
     </span>
   );
 }

@@ -13,10 +13,10 @@ Scoring runs on good faith. What each person is shown is a soft permission, not 
 
 ## Install
 
-Until it is listed in the Registry, install it from a release:
+In Eidos MD, open **Community plugins**, find **Quizzes** under Browse, and install it. From the shell:
 
 ```bash
-eidos plugin install github:The-Virtual-Panda/eidos-quizzes
+eidos plugin install @The-Virtual-Panda/quizzes
 eidos plugin enable quizzes
 eidos plugin allow quizzes
 ```
@@ -35,7 +35,7 @@ A quiz is a markdown file you can read and edit by hand. `eidos quizzes --help` 
 
 ## Develop
 
-This checkout builds against an `eidosmd` checkout beside it (`../eidosmd/cli`).
+The source is at [The-Virtual-Panda/eidos-quizzes](https://github.com/The-Virtual-Panda/eidos-quizzes). A checkout builds against an `eidosmd` checkout beside it (`../eidosmd/cli`).
 
 ```bash
 pnpm install

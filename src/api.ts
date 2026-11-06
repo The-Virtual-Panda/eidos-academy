@@ -35,6 +35,7 @@ export interface QuizRow {
   draws_from: string[];
   questions: number;
   created_by: string | null;
+  created_by_name: string | null;
   status: QuizStatus;
   best: number | null;
 }
@@ -55,6 +56,8 @@ export function makeApi(host: Host) {
     const mine = official.filter((attempt) => attempt.quiz === quiz && attempt.by === alias);
     return mine.length > 0 ? Math.max(...mine.map(percent)) : null;
   };
+
+  const nameOf = (alias: string | null): string | null => (alias === null ? null : (store.people().find((person) => person.alias === alias)?.name ?? alias));
 
   const rows = (): QuizRow[] => {
     const { quizzes, courses } = store.list();
@@ -81,6 +84,7 @@ export function makeApi(host: Host) {
         draws_from: quiz.draws_from,
         questions: askable(quiz).length,
         created_by: quiz.created_by,
+        created_by_name: nameOf(quiz.created_by),
         best: bestOf(quiz.id, me?.alias ?? null, official),
       };
     });
@@ -125,6 +129,8 @@ export function makeApi(host: Host) {
       const course = listed.courses.find((held) => held.id === quiz.course) ?? null;
       return {
         quiz,
+        created_by_name: nameOf(quiz.created_by),
+        proctor_names: Object.fromEntries(quiz.proctors.map((alias) => [alias, nameOf(alias)])),
         askable: askable(quiz).length,
         course: course ? { id: course.id, title: course.title } : null,
         place: quiz.course ? inCourse.findIndex((held) => held.id === quiz.id) + 1 : null,
@@ -296,6 +302,7 @@ export function makeApi(host: Host) {
       const done = alias ? store.sessionsDone(alias) : {};
       return {
         course,
+        created_by_name: nameOf(course.created_by),
         may: { edit: canEdit(course, store.access()) },
         quizzes,
         progress: {
