@@ -1,6 +1,6 @@
 {
   "name": "eidos-quizzes",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Quizzes for Eidos MD: multiple-choice quizzes on a project's content, ordered courses, and every person's scores over time.",
   "type": "module",

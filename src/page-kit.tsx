@@ -2,7 +2,7 @@
 // a quiz, a course, its scores, and a result take Bible Academy's look (Quizzes REQ36),
 // a surface of the plugin's own, styled only with the page's tokens so a theme holds.
 import { useCallback, useEffect, useState, type JSX, type ReactNode } from 'react';
-import { Notice, SkeletonBar, Stack, useFileChanges, usePluginHost, type PluginHost } from 'eidosmd/page';
+import { Notice, SkeletonBar, Stack, useCrumbs, useFileChanges, usePluginHost, type Crumb, type PluginHost } from 'eidosmd/page';
 
 export const CSS = `
 .qz { max-width: 880px; margin: 0 auto; padding: 4px 0 56px; font-size: var(--text-body); line-height: 1.6; color: var(--color-fg); }
@@ -104,6 +104,11 @@ export const CSS = `
 .qz-aux { padding: 0 12px 12px; font-size: var(--text-base); }
 @media (max-width: 760px) { .qz-h1 { font-size: 26px; } .qz-score { font-size: 68px; } .qz-prompt { font-size: var(--text-2xl); } .qz-qlist { max-width: none; } }
 `;
+
+// The way back over the page. Eidos MD 0.18 has no useCrumbs and reads the way back from the address instead.
+export function useTrail(trail: Crumb[] | null): void {
+  useCrumbs?.(trail);
+}
 
 export function Surface({ children }: { children: ReactNode }): JSX.Element {
   return (

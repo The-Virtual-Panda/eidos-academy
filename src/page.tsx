@@ -23,14 +23,13 @@ import {
   Stack,
   Text,
   Textarea,
-  useCrumbs,
   useOpen,
   usePluginHost,
   type AgentPageApi,
   type PagePlugin,
   type PluginHost,
 } from 'eidosmd/page';
-import { asPercent, Delta, Failed, formatDate, HelpMark, LaptopMark, Loading, Stat, Surface, useAct, useData, UserPill } from './page-kit.tsx';
+import { asPercent, Delta, Failed, formatDate, HelpMark, LaptopMark, Loading, Stat, Surface, useAct, useData, UserPill, useTrail } from './page-kit.tsx';
 import type { Attempt, AttemptKind, AttemptMode, Comparison, Course, MyScores, PersonResult, Question, Quiz } from './model.ts';
 
 // ---- what the routes answer ------------------------------------------------------------
@@ -229,7 +228,7 @@ function QuizList({ show }: { show: string | null }): JSX.Element {
   const [creator, setCreator] = useState('');
   const [sort, setSort] = useState<{ key: SortKey; turned: boolean } | null>(null);
   const [making, setMaking] = useState<'quiz' | 'course' | null>(null);
-  useCrumbs(null);
+  useTrail(null);
 
   const rows = useMemo(() => {
     if (!data) return [];
@@ -559,7 +558,7 @@ function CoursePage({ id }: { id: string }): JSX.Element {
   const { data: picks } = useData<Pickable>('pickable');
   const { data: overview } = useData<Overview>('overview');
   const [adding, setAdding] = useState(false);
-  useCrumbs(data ? [{ label: 'Quizzes', href: pageHref(host, '') }, { label: data.course.title }] : null);
+  useTrail(data ? [{ label: 'Quizzes', href: pageHref(host, '') }, { label: data.course.title }] : null);
   if (error) return <Failed message={error} />;
   if (!data) return <Loading />;
   const { course, quizzes, progress } = data;
@@ -1278,7 +1277,7 @@ function QuizPage({ id, tab, generate }: { id: string; tab: string; generate: st
   const { data, error, reload } = useData<QuizView>(`quiz?id=${Q(id)}`);
   const { data: picks } = useData<Pickable>('pickable');
   const { data: overview } = useData<Overview>('overview');
-  useCrumbs(
+  useTrail(
     data
       ? [
           { label: 'Quizzes', href: pageHref(host, '') },
@@ -1458,7 +1457,7 @@ function shuffle<T>(items: T[]): T[] {
 function Take({ id, kind, mode }: { id: string; kind: AttemptKind; mode: AttemptMode }): JSX.Element {
   const host = usePluginHost();
   const { data, error } = useData<QuizView>(`quiz?id=${Q(id)}`);
-  useCrumbs(
+  useTrail(
     data
       ? [{ label: 'Quizzes', href: pageHref(host, '') }, { label: data.quiz.id, mono: true, href: pageHref(host, `quiz/${Q(id)}`) }, { label: kind === 'official' ? 'Official attempt' : 'Practice' }]
       : null,

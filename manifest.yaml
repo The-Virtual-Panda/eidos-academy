@@ -2,8 +2,8 @@
 name: quizzes
 title: Quizzes
 description: "Build multiple-choice quizzes on your project's content, group them into ordered courses, practice locally, take them officially, and keep every score over time"
-version: 0.1.0
-min_host: 0.19.0
+version: 0.1.1
+min_host: 0.18.0
 folder:
   kind: quizzes
   name: quizzes
