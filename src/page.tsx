@@ -380,9 +380,9 @@ export function NewQuiz({ onClose, courses, draws, course: startCourse }: { onCl
           <span className="qz-label">Title</span>
           <Input autoFocus value={title} onChange={(event: { target: HTMLInputElement }) => setTitle(event.target.value)} />
         </label>
-        <label>
+        <div>
           <span className="qz-label">Course (optional)</span>
-          <Select value={course} onChange={(event: { target: HTMLSelectElement }) => setCourse(event.target.value)}>
+          <Select aria-label="Course" value={course} onChange={(event: { target: HTMLSelectElement }) => setCourse(event.target.value)}>
             <option value="">None, a one-off</option>
             {courses.map((held) => (
               <option key={held.id} value={held.id}>
@@ -390,7 +390,7 @@ export function NewQuiz({ onClose, courses, draws, course: startCourse }: { onCl
               </option>
             ))}
           </Select>
-        </label>
+        </div>
         <div>
           <span className="qz-label">Draws from</span>
           <Row gap="xs" wrap>
