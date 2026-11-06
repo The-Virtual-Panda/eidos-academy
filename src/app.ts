@@ -1,0 +1,51 @@
+// Quizzes's app entry, which only the Eidos MD app mounts: the routes its page half calls,
+// under /api/plugins/quizzes/. Every rule is in the API the commands share.
+import { HostError, type AppEntry, type PluginRequest } from 'eidosmd/plugin';
+import type { Api } from './api.ts';
+import type { AttemptKind, AttemptMode, Question } from './model.ts';
+
+function need(request: PluginRequest, name: string): string {
+  const value = request.query.get(name) ?? (typeof request.body[name] === 'string' ? (request.body[name] as string) : null);
+  if (!value) throw new HostError(400, `${name} is needed`);
+  return value;
+}
+
+const entry: AppEntry<Api> = {
+  name: 'quizzes',
+  mount(host, api) {
+    host.route('GET', 'overview', () => api.overview());
+    host.route('GET', 'pickable', () => api.pickable());
+
+    host.route('GET', 'quiz', (request) => api.quiz(need(request, 'id')));
+    host.route('POST', 'quiz', (request) => api.createQuiz(request.body as { title: string; draws_from?: string[]; course?: string | null; place?: number | null }));
+    host.route('PUT', 'quiz', (request) => api.updateQuiz(need(request, 'id'), request.body as Parameters<Api['updateQuiz']>[1]));
+    host.route('DELETE', 'quiz', (request) => api.removeQuiz(need(request, 'id')));
+
+    host.route('GET', 'source', (request) => api.quizSource(need(request, 'id')));
+    host.route('PUT', 'source', (request) => api.saveQuizSource(need(request, 'id'), request.body['text'] as string));
+
+    host.route('PUT', 'question', (request) => api.saveQuestion(need(request, 'id'), request.body['question'] as Question));
+    host.route('POST', 'question/blank', (request) => api.store.blankQuestion(api.store.quiz(need(request, 'id'))));
+    host.route('DELETE', 'question', (request) => api.removeQuestion(need(request, 'id'), need(request, 'question')));
+    host.route('PUT', 'questions/order', (request) => api.orderQuestions(need(request, 'id'), request.body['ids'] as string[]));
+
+    host.route('GET', 'compare', (request) => api.compare(need(request, 'id')));
+    host.route('GET', 'results', (request) => api.results(need(request, 'id')));
+    host.route('GET', 'attempt', (request) => api.attempt(need(request, 'id'), need(request, 'attempt')));
+    host.route('POST', 'attempt', (request) => api.submit(request.body as { quiz: string; kind: AttemptKind; mode: AttemptMode; answers: Array<{ question: string; chosen: number }> }));
+
+    host.route('GET', 'course', (request) => api.course(need(request, 'id')));
+    host.route('POST', 'course', (request) => api.createCourse(request.body as { title: string; description?: string }));
+    host.route('PUT', 'course', (request) => api.updateCourse(need(request, 'id'), request.body as Parameters<Api['updateCourse']>[1]));
+    host.route('DELETE', 'course', (request) => api.removeCourse(need(request, 'id')));
+    host.route('PUT', 'course/order', (request) => api.reorderCourse(need(request, 'id'), request.body['ids'] as string[]));
+
+    host.route('GET', 'blueprint', (request) => api.forBlueprint(need(request, 'id')));
+    host.route('PUT', 'session', async (request) => {
+      await api.setSessionDone(need(request, 'blueprint'), request.body['done'] === true);
+      return { ok: true };
+    });
+  },
+};
+
+export default entry;

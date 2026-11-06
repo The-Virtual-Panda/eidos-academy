@@ -1,0 +1,29 @@
+{
+  "name": "eidos-quizzes",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Quizzes for Eidos MD: multiple-choice quizzes on a project's content, ordered courses, and every person's scores over time.",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "dev": "node scripts/build.mjs --watch",
+    "check": "tsc --noEmit -p tsconfig.json",
+    "test": "node scripts/build.mjs && node --test --experimental-strip-types \"test/*.test.ts\""
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/react": "^18.3.12",
+    "eidosmd": "link:../eidosmd/cli",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.9.3",
+    "yaml": "^2.8.0"
+  },
+  "engines": {
+    "node": ">=22.6"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/The-Virtual-Panda/eidos-quizzes.git"
+  }
+}
