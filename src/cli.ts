@@ -1,11 +1,12 @@
-// Quizzes's CLI entry, what every host loads: `eidos quizzes`, the check's findings on the
+// Academy's CLI entry, what every host loads: `eidos academy`, the check's findings on the
 // plugin's files, and ids following a blueprint that takes a new one. The agent writes a quiz
-// with these commands, as the page does; the words of a question are the conversation's.
+// and a deck with these commands, as the page does; the words of a question or a card are the
+// conversation's.
 import { existsSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { HostError, type CliEntry, type Host } from 'eidosmd/plugin';
 import { makeApi } from './api.ts';
-import { askable, compare, questionProblems, renderCourse, renderQuiz, type Question } from './model.ts';
+import { askable, cardProblems, compare, questionProblems, renderCourse, renderDeck, renderQuiz, studiable, type Card, type Question } from './model.ts';
 
 export type { Api } from './api.ts';
 
@@ -47,6 +48,12 @@ function answerIndex(value: string | undefined, options: string[]): number | nul
   return number - 1;
 }
 
+function checkedCard(card: Card): Card {
+  const problems = cardProblems(card);
+  if (problems.length > 0) throw new HostError(400, `this card can't be saved: ${problems.join('; ')}`);
+  return card;
+}
+
 function checked(question: Question): Question {
   const problems = questionProblems(question);
   if (problems.length > 0) throw new HostError(400, `this question can't be saved: ${problems.join('; ')}`);
@@ -58,23 +65,27 @@ const entry: CliEntry = {
     const api = makeApi(host);
     const { store } = api;
 
-    host.command((quizzes) => {
-      quizzes.description("quizzes on the project's content: build them, group them into courses, and read their scores");
+    host.command((academy) => {
+      academy.description("quizzes and flashcard decks on the project's content: build them, group them into courses, and follow how people are doing");
 
-      quizzes
+      academy
         .command('list')
-        .description('every quiz, with its course and place, what it draws from, and your best')
-        .option('--json', '{ me, folder, quizzes[], courses[] }')
+        .description('every quiz and deck, with its course and place, what it draws from, and where you stand in it')
+        .option('--json', '{ me, folder, quizzes[], decks[], courses[], quizzes_left }')
         .action(async (_options: unknown, command: Options) => {
           await run(command, (json) => {
             const overview = api.overview();
-            const lines = overview.quizzes.map(
-              (row) =>
-                `${row.id}  ${row.title}  ·  ${row.course_title ? `${row.course_title} ${row.place}` : 'one-off'}  ·  ${row.status === 'closed' ? 'closed  ·  ' : ''}${row.questions} questions  ·  best ${asPercent(row.best)}`,
-            );
-            say(json, overview, lines.join('\n') || 'no quizzes yet; eidos quizzes new "<Title>" starts one');
+            const where = (row: { course_title: string | null; place: number | null }): string => (row.course_title ? `${row.course_title} ${row.place}` : 'one-off');
+            const lines = [
+              ...overview.quizzes.map((row) => `${row.id}  quiz  ${row.title}  ·  ${where(row)}  ·  ${row.status === 'closed' ? 'closed  ·  ' : ''}${row.questions} questions  ·  best ${asPercent(row.best)}`),
+              ...overview.decks.map((row) => `${row.id}  deck  ${row.title}  ·  ${where(row)}  ·  ${row.status === 'closed' ? 'closed  ·  ' : ''}${row.cards} cards  ·  ${row.learned} learned`),
+            ];
+            const left = overview.quizzes_left ? `\n\nQuizzes left ${overview.quizzes_left.quizzes} quizzes and ${overview.quizzes_left.results} result files here; eidos academy move-quizzes brings them into Academy` : '';
+            say(json, overview, (lines.join('\n') || 'nothing yet; eidos academy quiz new "<Title>" or eidos academy deck new "<Title>" starts one') + left);
           });
         });
+
+      const quizzes = academy.command('quiz').description('build a quiz, change it, or read its results');
 
       quizzes
         .command('show')
@@ -91,7 +102,7 @@ const entry: CliEntry = {
       quizzes
         .command('new')
         .argument('<title>', "the quiz's title")
-        .description('start a quiz; add its questions with eidos quizzes question add')
+        .description('start a quiz; add its questions with eidos academy question add')
         .option('--draws-from <source>', 'a blueprint id, an asset path, or a link (repeatable)', collect, [] as string[])
         .option('--course <course>', "the course's id; absent, a one-off")
         .option('--place <n>', 'its place in the course, from 1; absent, last')
@@ -177,7 +188,7 @@ const entry: CliEntry = {
           });
         });
 
-      const question = quizzes.command('question').description("add, change, or remove a quiz's questions");
+      const question = academy.command('question').description("add, change, or remove a quiz's questions");
       const questionFlags = (command: ReturnType<typeof question.command>) =>
         command
           .option('--prompt <text>', 'what is asked')
@@ -249,31 +260,191 @@ const entry: CliEntry = {
           });
         });
 
-      const course = quizzes.command('course').description('group quizzes into ordered courses');
+      // ---- decks and their cards ----
+
+      const deck = academy.command('deck').description('build a deck of flashcards, change it, or see where you stand in it');
+      deck
+        .command('show')
+        .argument('<deck>', "the deck's id")
+        .description('one deck, with its cards and where you stand in it')
+        .option('--json', '{ deck, progress, standings, ... }')
+        .action(async (id: string, _options: unknown, command: Options) => {
+          await run(command, (json) => {
+            const shown = api.deck(id);
+            const { progress } = shown;
+            say(json, shown, `${renderDeck(shown.deck).trimEnd()}\n\nYou: ${progress.learned} of ${progress.of} learned, ${progress.learning} still learning, ${progress.new} not yet seen`);
+          });
+        });
+      deck
+        .command('new')
+        .argument('<title>', "the deck's title")
+        .description('start a deck; add its cards with eidos academy card add, or make them from a quiz')
+        .option('--draws-from <source>', 'a blueprint id, an asset path, or a link (repeatable)', collect, [] as string[])
+        .option('--from-quiz <quiz>', "make its first cards from a quiz's questions: the prompt on the front, the answer and why on the back")
+        .option('--course <course>', "the course's id; absent, the quiz's course with --from-quiz, else a one-off")
+        .option('--place <n>', 'its place in the course, from 1; absent, last')
+        .option('--created-by <alias>', 'who created it; absent, you')
+        .option('--closed', 'keep it closed until someone opens it; absent, it opens as soon as it has a card')
+        .option('--json', 'the deck')
+        .action(async (title: string, options: { drawsFrom: string[]; fromQuiz?: string; course?: string; place?: string; createdBy?: string; closed?: boolean }, command: Options) => {
+          await run(command, async (json) => {
+            let made = await api.createDeck({
+              title,
+              draws_from: options.drawsFrom,
+              course: options.course ? store.course(options.course).id : null,
+              place: options.place ? Number(options.place) : null,
+              from_quiz: options.fromQuiz ?? null,
+            });
+            if (options.createdBy || options.closed) {
+              made = { ...made, ...(options.createdBy ? { created_by: options.createdBy } : {}), ...(options.closed ? { closed: true } : {}) };
+              await store.saveDeck(made);
+              made = store.deck(made.id);
+            }
+            say(json, made, `started ${made.id}  ${made.path}${made.cards.length > 0 ? `  ·  ${made.cards.length} cards from ${made.made_from}` : ''}`);
+          });
+        });
+      deck
+        .command('set')
+        .argument('<deck>', "the deck's id")
+        .description("change a deck's title, sources, course, place, size of a session, creator, or editors")
+        .option('--status <status>', 'open or closed')
+        .option('--title <title>', 'its title')
+        .option('--add-source <source>', 'a blueprint id, an asset path, or a link to draw from (repeatable)', collect, [] as string[])
+        .option('--remove-source <source>', 'stop drawing from it (repeatable)', collect, [] as string[])
+        .option('--course <course>', 'move it into this course; "" makes it a one-off')
+        .option('--place <n>', 'its place in its course, from 1')
+        .option('--per-session <n>', 'how many cards Study takes at a time (20 unless set)')
+        .option('--created-by <alias>', 'hand it to another creator')
+        .option('--add-proctor <alias>', 'someone else who may edit it (repeatable)', collect, [] as string[])
+        .option('--remove-proctor <alias>', 'no longer edits it (repeatable)', collect, [] as string[])
+        .option('--add-from-quiz <quiz>', "add a quiz's questions as cards, skipping the ones the deck has")
+        .option('--json', 'the deck')
+        .action(
+          async (
+            id: string,
+            options: { status?: string; title?: string; addSource: string[]; removeSource: string[]; course?: string; place?: string; perSession?: string; createdBy?: string; addProctor: string[]; removeProctor: string[]; addFromQuiz?: string },
+            command: Options,
+          ) => {
+            await run(command, async (json) => {
+              let held = store.deck(id);
+              if (options.status !== undefined && options.status !== 'open' && options.status !== 'closed') throw new HostError(400, '--status is open or closed');
+              if (options.addFromQuiz) held = (await api.cardsFromQuiz(held.id, options.addFromQuiz)).deck;
+              if (options.status === 'open' && studiable(held).length === 0) throw new HostError(400, 'add a card before opening this deck');
+              if (options.course !== undefined) held = await store.moveDeck(held.id, options.course === '' ? null : store.course(options.course).id);
+              const known = new Set(store.people().map((person) => person.alias));
+              for (const alias of options.addProctor) if (!known.has(alias)) throw new HostError(400, `${alias} is not in the project's users; eidos users lists them`);
+              const size = options.perSession === undefined ? held.per_session : Number(options.perSession);
+              if (!Number.isInteger(size) || size < 1 || size > 500) throw new HostError(400, '--per-session is 1 to 500 cards');
+              await store.saveDeck({
+                ...held,
+                per_session: size,
+                ...(options.status ? { closed: options.status === 'closed' } : {}),
+                ...(options.title ? { title: options.title } : {}),
+                ...(options.createdBy ? { created_by: options.createdBy } : {}),
+                draws_from: [...new Set([...held.draws_from.filter((source) => !options.removeSource.includes(source)), ...options.addSource])],
+                proctors: [...new Set([...held.proctors.filter((alias) => !options.removeProctor.includes(alias)), ...options.addProctor])],
+              });
+              if (options.place) await store.place(held.id, Number(options.place));
+              const saved = store.deck(held.id);
+              say(json, saved, `changed ${saved.id}  ${saved.path}`);
+            });
+          },
+        );
+      deck
+        .command('remove')
+        .argument('<deck>', "the deck's id")
+        .description("delete a deck; people's study sessions with it stay in their history")
+        .option('--json', '{ removed }')
+        .action(async (id: string, _options: unknown, command: Options) => {
+          await run(command, (json) => {
+            const removed = store.removeDeck(id);
+            say(json, { removed: removed.id }, `removed ${removed.id}`);
+          });
+        });
+
+      const card = academy.command('card').description("add, change, or remove a deck's cards");
+      const cardFlags = (command: ReturnType<typeof card.command>) =>
+        command.option('--front <text>', 'what is shown first').option('--back <text>', 'the answer').option('--reference <text>', 'where it comes from').option('--json', 'the card');
+      cardFlags(card.command('add').argument('<deck>', "the deck's id").description('add a card to the end of a deck')).action(
+        async (id: string, options: { front?: string; back?: string; reference?: string }, command: Options) => {
+          await run(command, async (json) => {
+            const held = store.deck(id);
+            const added = checkedCard({ id: store.newCardId(held), front: options.front ?? '', back: options.back ?? '', reference: options.reference ?? '' });
+            await store.saveDeck({ ...held, cards: [...held.cards, added] });
+            say(json, added, `added ${added.id} to ${held.id}`);
+          });
+        },
+      );
+      cardFlags(
+        card
+          .command('set')
+          .argument('<deck>', "the deck's id")
+          .argument('<card>', "the card's id")
+          .description('change a card; it keeps its id, and where everyone stands with it, unless --regenerated')
+          .option('--regenerated', 'a new card in its place: it takes a new id and counts as not yet seen'),
+      ).action(async (id: string, cardId: string, options: { front?: string; back?: string; reference?: string; regenerated?: boolean }, command: Options) => {
+        await run(command, async (json) => {
+          const held = store.deck(id);
+          const at = held.cards.findIndex((one) => one.id === cardId);
+          const was = held.cards[at];
+          if (!was) throw new HostError(404, `${held.id} has no card ${cardId}`);
+          const changed = checkedCard({
+            id: options.regenerated ? store.newCardId(held) : was.id,
+            front: options.front ?? was.front,
+            back: options.back ?? was.back,
+            reference: options.reference ?? was.reference,
+          });
+          const cards = [...held.cards];
+          cards[at] = changed;
+          await store.saveDeck({ ...held, cards });
+          say(json, changed, `changed ${changed.id} in ${held.id}`);
+        });
+      });
+      card
+        .command('remove')
+        .argument('<deck>', "the deck's id")
+        .argument('<card>', "the card's id")
+        .description('take a card out; past study sessions keep their copy of it')
+        .option('--json', '{ removed }')
+        .action(async (id: string, cardId: string, _options: unknown, command: Options) => {
+          await run(command, async (json) => {
+            const held = store.deck(id);
+            if (!held.cards.some((one) => one.id === cardId)) throw new HostError(404, `${held.id} has no card ${cardId}`);
+            await store.saveDeck({ ...held, cards: held.cards.filter((one) => one.id !== cardId) });
+            say(json, { removed: cardId }, `removed ${cardId} from ${held.id}`);
+          });
+        });
+
+      const course = academy.command('course').description('group quizzes and decks into ordered courses');
       course
         .command('list')
         .description('every course')
         .option('--json', '{ courses[] }')
         .action(async (_options: unknown, command: Options) => {
           await run(command, (json) => {
-            const { courses, quizzes: all } = store.list();
+            const { courses } = store.list();
             say(
               json,
               { courses },
-              courses.map((held) => `${held.id}  ${held.title}  ·  ${all.filter((quiz) => quiz.course === held.id).length} quizzes`).join('\n') ||
-                'no courses yet; eidos quizzes course new "<Title>" starts one',
+              courses.map((held) => `${held.id}  ${held.title}  ·  ${store.inCourse(held.id).length} quizzes and decks`).join('\n') ||
+                'no courses yet; eidos academy course new "<Title>" starts one',
             );
           });
         });
       course
         .command('show')
         .argument('<course>', "the course's id")
-        .description('one course, with its quizzes in order and your progress')
-        .option('--json', '{ course, enrolled_since, quizzes[], progress, content[], sessions[] }')
+        .description('one course, with its quizzes and decks in order and your progress')
+        .option('--json', '{ course, enrolled_since, quizzes[], decks[], items[], progress, content[], sessions[] }')
         .action(async (id: string, _options: unknown, command: Options) => {
           await run(command, (json) => {
             const shown = api.course(id);
-            say(json, shown, [renderCourse(shown.course).trimEnd(), '', ...shown.quizzes.map((row) => `${row.place}. ${row.id}  ${row.title}  ·  best ${asPercent(row.best)}`)].join('\n'));
+            const lines = shown.items.map((placed) =>
+              placed.kind === 'quiz'
+                ? `${placed.row.place}. ${placed.row.id}  quiz  ${placed.row.title}  ·  best ${asPercent(placed.row.best)}`
+                : `${placed.row.place}. ${placed.row.id}  deck  ${placed.row.title}  ·  ${placed.row.learned} of ${placed.row.cards} learned`,
+            );
+            say(json, shown, [renderCourse(shown.course).trimEnd(), '', ...lines].join('\n'));
           });
         });
       course
@@ -390,12 +561,12 @@ const entry: CliEntry = {
       course
         .command('remove')
         .argument('<course>', "the course's id")
-        .description('delete a course; its quizzes stay, as one-offs')
-        .option('--json', '{ removed, quizzes }')
+        .description('delete a course; its quizzes and decks stay, as one-offs')
+        .option('--json', '{ removed, quizzes, decks }')
         .action(async (id: string, _options: unknown, command: Options) => {
           await run(command, async (json) => {
             const removed = await store.removeCourse(id);
-            say(json, { removed: removed.course.id, quizzes: removed.quizzes }, `removed ${removed.course.id}; ${removed.quizzes} quizzes are one-offs now`);
+            say(json, { removed: removed.course.id, quizzes: removed.quizzes, decks: removed.decks }, `removed ${removed.course.id}; ${removed.quizzes} quizzes and ${removed.decks} decks are one-offs now`);
           });
         });
 
@@ -418,7 +589,7 @@ const entry: CliEntry = {
           });
         });
 
-      const session = quizzes.command('session').description('mark a study session done or not, for you, never in its file');
+      const session = academy.command('session').description("mark a study plan's session done or not, for you, never in its file");
       for (const [name, done] of [
         ['done', true],
         ['undone', false],
@@ -435,6 +606,34 @@ const entry: CliEntry = {
             });
           });
       }
+
+      academy
+        .command('move-quizzes')
+        .description('bring in what the Quizzes plugin, Academy\'s name before 0.3.0, left in this project: its quizzes, courses, results, and practice')
+        .option('--dry-run', 'say what would move, and move nothing')
+        .option('--json', '{ quizzes, courses, results, folder, then[] }')
+        .action(async (options: { dryRun?: boolean }, command: Options) => {
+          await run(command, (json) => {
+            const left = store.quizzesLeft();
+            if (left.files.length + left.results.length === 0) {
+              say(json, { quizzes: 0, courses: 0, results: 0, folder: null, then: [] }, 'nothing from Quizzes is left in this project');
+              return;
+            }
+            if (options.dryRun) {
+              say(json, { ...left, dry_run: true }, `would move ${left.files.length} files from ${left.folder ?? 'nowhere'}/ into ${store.folderName()}/, and ${left.results.length} result and practice files into Academy's workspace`);
+              return;
+            }
+            const moved = api.moveFromQuizzes();
+            say(
+              json,
+              moved,
+              [
+                `moved ${moved.quizzes} quizzes and ${moved.courses} courses into ${store.folderName()}/, and ${moved.results} result and practice files; every id stays`,
+                ...(moved.then.length > 0 ? ['', 'Then, to finish:', ...moved.then.map((line) => `  ${line}`)] : []),
+              ].join('\n'),
+            );
+          });
+        });
     });
 
     // ---- what the check reports on the plugin's own files ----
@@ -456,16 +655,37 @@ const entry: CliEntry = {
         ),
     });
     host.finding({
+      code: 'card',
+      level: 'warning',
+      run: () =>
+        store.list().decks.flatMap((held) =>
+          held.cards.flatMap((one) => {
+            const problems = cardProblems(one);
+            return problems.length > 0 ? [{ path: held.path, message: `card ${one.id}: ${problems.join('; ')}, so it is left out when the deck is studied` }] : [];
+          }),
+        ),
+    });
+    host.finding({
+      code: 'quizzes-left',
+      level: 'warning',
+      run: () => {
+        const left = store.quizzesLeft();
+        if (left.files.length + left.results.length === 0) return [];
+        return [{ path: left.folder ?? '.eidos/plugins/quizzes', message: `Quizzes, Academy's name before 0.3.0, left ${left.files.length} quizzes and courses and ${left.results.length} result files here; eidos academy move-quizzes brings them into Academy` }];
+      },
+    });
+    host.finding({
       code: 'source-gone',
       level: 'warning',
       run: () => {
         const context = host.context();
         const ids = new Set(context.blueprints.map((blueprint) => blueprint.properties?.['id']));
-        return store.list().quizzes.flatMap((quiz) =>
-          quiz.draws_from.flatMap((source) => {
+        const listed = store.list();
+        return [...listed.quizzes.map((held) => ({ held, what: 'quiz' })), ...listed.decks.map((held) => ({ held, what: 'deck' }))].flatMap(({ held, what }) =>
+          held.draws_from.flatMap((source) => {
             if (/^[a-z]+:\/\//i.test(source)) return [];
             const found = source.includes('/') ? existsSync(path.join(context.root, source)) : ids.has(source);
-            return found ? [] : [{ path: quiz.path, message: `this quiz draws from ${source}, which is gone` }];
+            return found ? [] : [{ path: held.path, message: `this ${what} draws from ${source}, which is gone` }];
           }),
         );
       },
@@ -486,6 +706,13 @@ const entry: CliEntry = {
             path: quiz.path,
             what: `what ${quiz.id} draws from`,
             apply: () => writeFileSync(path.join(root, quiz.path), renderQuiz({ ...quiz, draws_from: follow(quiz.draws_from) })),
+          })),
+        ...listed.decks
+          .filter((held) => held.draws_from.some((source) => renamed.has(source)))
+          .map((held) => ({
+            path: held.path,
+            what: `what ${held.id} draws from`,
+            apply: () => writeFileSync(path.join(root, held.path), renderDeck({ ...held, draws_from: follow(held.draws_from) })),
           })),
         ...listed.courses
           .filter((course) => [...course.content, ...course.study_plan].some((link) => renamed.has(link)))

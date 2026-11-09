@@ -1,4 +1,4 @@
-// The pure work: a quiz's file reads back as it was written, and every sum a page shows.
+// The pure work: a quiz's and a deck's file read back as they were written, and every sum a page shows.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
@@ -7,7 +7,16 @@ import {
   canManage,
   canSeeCourse,
   canSeeResults,
+  cardsAcross,
+  cardsFromQuiz,
+  cardsToStudy,
   compare,
+  deckProgress,
+  isDeckSource,
+  makeReview,
+  parseDeck,
+  renderDeck,
+  standings,
   courseProgress,
   everyone,
   makeAttempt,
@@ -18,7 +27,9 @@ import {
   renderQuiz,
   statusOf,
   type Attempt,
+  type Deck,
   type Quiz,
+  type Review,
 } from '../src/model.ts';
 
 const quiz: Quiz = {
@@ -31,7 +42,7 @@ const quiz: Quiz = {
   closed: true,
   rank: 2,
   course: null,
-  path: 'quizzes/a-quiz.md',
+  path: 'academy/a-quiz.md',
   questions: [
     { id: 'q-one', prompt: 'First line\n\nSecond paragraph', options: ['Right', 'Wrong'], answer: 0, why: 'Because', reference: 'Page 1' },
     { id: 'q-two', prompt: 'Two', options: ['Wrong', 'Wrong too', 'Right'], answer: 2, why: '', reference: '' },
@@ -210,4 +221,102 @@ test('results go to the creator, proctors, and owners; editing to them too, and 
   assert.ok(!canManage(held, { alias: 'bo', owner: false }), 'a proctor does not change who holds it');
   assert.ok(canManage(held, { alias: 'ada', owner: false }));
   assert.ok(!canEdit(held, { alias: 'cy', owner: false }));
+});
+
+// ---- decks ----
+
+const deck: Deck = {
+  id: 'F-AAAA',
+  title: 'A deck',
+  draws_from: ['B-1'],
+  made_from: 'Q-AAAA',
+  created_by: 'ada',
+  proctors: [],
+  status: 'open',
+  closed: false,
+  rank: 1,
+  course: null,
+  per_session: 3,
+  path: 'academy/a-deck.md',
+  cards: [
+    { id: 'c-one', front: 'One\n\nwith a second line', back: 'The first\nback', reference: 'Page 1' },
+    { id: 'c-two', front: 'Two', back: 'The second', reference: '' },
+    { id: 'c-three', front: 'Three', back: 'The third', reference: '' },
+    { id: 'c-four', front: 'Four', back: 'The fourth', reference: '' },
+  ],
+};
+
+let clock = 0;
+function sitting(answers: Array<[string, boolean]>, mode: Review['mode'] = 'next'): Review {
+  clock += 1;
+  const at = new Date(Date.UTC(2026, 10, clock)).toISOString();
+  return makeReview({ id: `r-${clock}`, deck, by: 'ada', mode, startedAt: at, completedAt: at, answers: answers.map(([card, got]) => ({ card, got, at })) });
+}
+
+test("a deck's file reads back as it was written, and is told apart from a quiz's", () => {
+  const text = renderDeck(deck);
+  assert.ok(isDeckSource(text));
+  assert.ok(!isDeckSource(renderQuiz(quiz)));
+  assert.deepEqual(parseDeck(text, deck.path, null), deck);
+  assert.match(text, /^type: deck$/m);
+  assert.match(text, /^per_session: 3$/m);
+  assert.doesNotMatch(renderDeck({ ...deck, per_session: 20 }), /per_session/, 'the default is left out of the file');
+});
+
+test('a card is learned after two Got it in a row, and one missed goes back to learning', () => {
+  const reviews = [sitting([['c-one', true], ['c-two', false], ['c-three', true]]), sitting([['c-one', true], ['c-two', true], ['c-three', false]])];
+  const held = standings(deck, reviews);
+  assert.deepEqual(
+    ['c-one', 'c-two', 'c-three', 'c-four'].map((id) => held.get(id)!.state),
+    ['learned', 'learning', 'learning', 'new'],
+  );
+  assert.equal(held.get('c-three')!.last_got, false);
+  assert.equal(held.get('c-four')!.last_seen, null);
+  const progress = deckProgress(deck, reviews);
+  assert.deepEqual([progress.learned, progress.learning, progress.new, progress.of], [1, 2, 1, 4]);
+  assert.deepEqual(
+    progress.history.map((row) => [row.cards, row.still_learning, row.learned_after]),
+    [
+      [3, 1, 1],
+      [3, 1, 0],
+    ],
+    'newest first, with the learned count each session left',
+  );
+});
+
+test('a session takes the cards still being learned, then the unseen, then the learned studied longest ago, never by a date to come back', () => {
+  const reviews = [sitting([['c-one', true], ['c-one', true], ['c-two', true], ['c-two', true]]), sitting([['c-three', false]]), sitting([['c-two', true]])];
+  assert.deepEqual(cardsToStudy(deck, reviews, 'next'), ['c-three', 'c-four', 'c-one'], 'learning, then unseen, then the learned card seen longest ago, three a session');
+  assert.deepEqual(cardsToStudy(deck, reviews, 'next', 10), ['c-three', 'c-four', 'c-one', 'c-two']);
+  assert.deepEqual(cardsToStudy(deck, [sitting([['c-one', false], ['c-two', true]])], 'missed'), ['c-one'], 'missed: the latest sitting decides');
+  assert.deepEqual(cardsToStudy(deck, [], 'whole'), ['c-one', 'c-two', 'c-three', 'c-four']);
+});
+
+test('studying across decks takes the cards still being learned from every deck first, the decks taking turns', () => {
+  const other: Deck = { ...deck, id: 'F-BBBB', cards: [{ id: 'c-x', front: 'X', back: 'x', reference: '' }] };
+  const picked = cardsAcross(
+    [
+      { deck, reviews: [sitting([['c-one', false]])] },
+      { deck: other, reviews: [] },
+    ],
+    4,
+  );
+  assert.deepEqual(
+    picked.map((held) => `${held.deck}/${held.card}`),
+    ['F-AAAA/c-one', 'F-AAAA/c-two', 'F-BBBB/c-x', 'F-AAAA/c-three'],
+  );
+});
+
+test("a quiz's questions become cards: the prompt on the front, the answer and why on the back", () => {
+  let next = 0;
+  const cards = cardsFromQuiz(quiz, () => `c-${(next += 1)}`);
+  assert.deepEqual(cards[0], { id: 'c-1', front: 'First line\n\nSecond paragraph', back: 'Right. Because', reference: 'Page 1' });
+  assert.equal(cards[1]!.back, 'Right');
+});
+
+test('a study session keeps a copy of each card, and refuses a card the deck does not have', () => {
+  const review = sitting([['c-two', true]]);
+  assert.deepEqual(review.answers[0]!.card, deck.cards[1]);
+  assert.throws(() => makeReview({ id: 'r', deck, by: 'ada', mode: 'next', startedAt: '', completedAt: '', answers: [{ card: 'c-gone', got: true }] }), /no card c-gone/);
+  assert.throws(() => makeReview({ id: 'r', deck, by: 'ada', mode: 'next', startedAt: '', completedAt: '', answers: [] }), /at least one card/);
 });

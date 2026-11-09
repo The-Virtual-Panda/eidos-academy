@@ -1,15 +1,45 @@
-// The plugin's files: quizzes and courses in its own folder, official attempts in its
-// workspace, and practice attempts in its local folder. Every write of a file others see
-// goes through the host's one write path; a practice attempt is this machine's alone.
+// The plugin's files: quizzes, decks, and courses in its own folder; official attempts and
+// a signed-in person's study sessions in its workspace; practice attempts and the study
+// sessions of nobody in particular in its local folder. Every write of a file others see goes
+// through the host's one write path; what is in the local folder is this machine's alone.
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { HostError, type Host } from 'eidosmd/plugin';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
-import { accessOf, drawId, parseAttempt, parseCourse, parseQuiz, renderAttempt, renderCourse, renderQuiz, slugify, type Attempt, type Course, type Person, type Question, type Quiz } from './model.ts';
+import {
+  accessOf,
+  CARDS_A_SESSION,
+  drawId,
+  isDeckSource,
+  parseAttempt,
+  parseCourse,
+  parseDeck,
+  parseQuiz,
+  parseReview,
+  renderAttempt,
+  renderCourse,
+  renderDeck,
+  renderQuiz,
+  renderReview,
+  slugify,
+  type Attempt,
+  type Card,
+  type Course,
+  type Deck,
+  type Person,
+  type Question,
+  type Quiz,
+  type Review,
+} from './model.ts';
 
 export const COURSE_FILE = 'course.md';
 const ENROLLMENTS_FILE = 'enrollments.yaml';
+// a person's study sessions, one file each, beside their attempts
+const REVIEWS_FOLDER = 'reviews';
+// what the Quizzes plugin, Academy's name before 0.3.0, kept its files under
+export const QUIZZES_OWNER = '@quizzes/quizzes';
+const QUIZZES_WORKSPACE = '.eidos/plugins/quizzes';
 // who a practice attempt is by while no user is selected
 export const LOCAL_PERSON = 'local';
 
@@ -21,6 +51,7 @@ export interface ProjectPerson extends Person {
 
 export interface Listed {
   quizzes: Quiz[];
+  decks: Deck[];
   courses: Course[];
   // a file of the plugin's folder that would not read, and why
   problems: Array<{ path: string; message: string }>;
@@ -38,6 +69,8 @@ function listDir(folder: string): string[] {
   }
 }
 
+export type Placed = { kind: 'quiz'; item: Quiz } | { kind: 'deck'; item: Deck };
+
 export class Store {
   constructor(private readonly host: Host) {}
 
@@ -47,8 +80,8 @@ export class Store {
 
   // the folder the framework declares as the plugin's, whatever the owner named it
   folderName(): string {
-    const declared = this.host.context().framework.folders.find((folder) => folder.ownedBy === '@quizzes/quizzes');
-    return declared?.name ?? 'quizzes';
+    const declared = this.host.context().framework.folders.find((folder) => folder.ownedBy === '@academy/academy');
+    return declared?.name ?? 'academy';
   }
 
   private abs(rel: string): string {
@@ -63,14 +96,18 @@ export class Store {
 
   list(): Listed {
     const quizzes: Quiz[] = [];
+    const decks: Deck[] = [];
     const courses: Course[] = [];
     const problems: Listed['problems'] = [];
     const folder = this.folderName();
     const readQuiz = (rel: string, course: string | null): void => {
+      let source = '';
       try {
-        quizzes.push(parseQuiz(readFileSync(this.abs(rel), 'utf8'), rel, course));
+        source = readFileSync(this.abs(rel), 'utf8');
+        if (isDeckSource(source)) decks.push(parseDeck(source, rel, course));
+        else quizzes.push(parseQuiz(source, rel, course));
       } catch (cause) {
-        problems.push({ path: rel, message: `this quiz does not read: ${cause instanceof Error ? cause.message : String(cause)}` });
+        problems.push({ path: rel, message: `this ${isDeckSource(source) ? 'deck' : 'quiz'} does not read: ${cause instanceof Error ? cause.message : String(cause)}` });
       }
     };
     for (const name of listDir(this.abs(folder))) {
@@ -91,28 +128,44 @@ export class Store {
           problems.push({ path: `${rel}/${COURSE_FILE}`, message: `this course does not read: ${cause instanceof Error ? cause.message : String(cause)}` });
         }
       } else {
-        problems.push({ path: rel, message: `this folder has no ${COURSE_FILE}, so its quizzes are in no course` });
+        problems.push({ path: rel, message: `this folder has no ${COURSE_FILE}, so its quizzes and decks are in no course` });
       }
       for (const inner of listDir(this.abs(rel))) {
         if (inner === COURSE_FILE || !inner.endsWith('.md')) continue;
         readQuiz(`${rel}/${inner}`, course?.id ?? null);
       }
     }
-    quizzes.sort((a, b) => a.rank - b.rank || a.title.localeCompare(b.title));
+    const byRank = (a: { rank: number; title: string }, b: { rank: number; title: string }): number => a.rank - b.rank || a.title.localeCompare(b.title);
+    quizzes.sort(byRank);
+    decks.sort(byRank);
     courses.sort((a, b) => a.title.localeCompare(b.title));
-    return { quizzes, courses, problems };
+    return { quizzes, decks, courses, problems };
   }
 
   quiz(id: string): Quiz {
     const found = this.list().quizzes.find((quiz) => quiz.id.toLowerCase() === id.toLowerCase());
-    if (!found) throw new HostError(404, `no quiz ${id}; eidos quizzes list shows them`);
+    if (!found) throw new HostError(404, `no quiz ${id}; eidos academy list shows them`);
+    return found;
+  }
+
+  deck(id: string): Deck {
+    const found = this.list().decks.find((deck) => deck.id.toLowerCase() === id.toLowerCase());
+    if (!found) throw new HostError(404, `no deck ${id}; eidos academy list shows them`);
     return found;
   }
 
   course(id: string): Course {
     const found = this.list().courses.find((course) => course.id.toLowerCase() === id.toLowerCase());
-    if (!found) throw new HostError(404, `no course ${id}; eidos quizzes course list shows them`);
+    if (!found) throw new HostError(404, `no course ${id}; eidos academy course list shows them`);
     return found;
+  }
+
+  // A course's quizzes and decks in its order, which the two share.
+  inCourse(course: string | null): Placed[] {
+    const listed = this.list();
+    return [...listed.quizzes.map((quiz) => ({ kind: 'quiz' as const, item: quiz })), ...listed.decks.map((deck) => ({ kind: 'deck' as const, item: deck }))]
+      .filter((placed) => placed.item.course === course)
+      .sort((a, b) => a.item.rank - b.item.rank || a.item.title.localeCompare(b.item.title));
   }
 
   // ---- people -------------------------------------------------------------------
@@ -163,7 +216,7 @@ export class Store {
     return people.find((person) => (identity.email !== null && person.email === identity.email) || person.name === identity.name) ?? null;
   }
 
-  // Who someone counts as for what the page shows and who may change a thing (Quizzes REQ23).
+  // Who someone counts as for what the page shows and who may change a thing (Academy REQ23).
   access(): Person {
     return accessOf(
       this.me(),
@@ -180,7 +233,7 @@ export class Store {
   }
 
   // Who signs an official attempt or an enrollment: the person acting, added to the project's
-  // users the first time they need to be (Quizzes REQ18).
+  // users the first time they need to be (Academy REQ18).
   signer(what: 'An official attempt' | 'Enrolling' = 'An official attempt'): ProjectPerson {
     const me = this.me();
     if (me) {
@@ -222,8 +275,8 @@ export class Store {
   }
 
   private nextRank(courseId: string | null): number {
-    const quizzes = this.list().quizzes.filter((quiz) => quiz.course === courseId && quiz.rank !== Number.MAX_SAFE_INTEGER);
-    return Math.max(0, ...quizzes.map((quiz) => quiz.rank)) + 1;
+    const ranked = this.inCourse(courseId).filter((placed) => placed.item.rank !== Number.MAX_SAFE_INTEGER);
+    return Math.max(0, ...ranked.map((placed) => placed.item.rank)) + 1;
   }
 
   async createQuiz(input: { closed?: boolean; title: string; draws_from?: string[]; course?: string | null; created_by?: string | null; rank?: number | null }): Promise<Quiz> {
@@ -232,10 +285,7 @@ export class Store {
     const listed = this.list();
     const course = input.course ?? null;
     const quiz: Quiz = {
-      id: drawId(
-        'Q-',
-        listed.quizzes.map((held) => held.id),
-      ),
+      id: drawId('Q-', [...listed.quizzes, ...listed.decks].map((held) => held.id)),
       title,
       draws_from: input.draws_from ?? [],
       created_by: input.created_by === undefined ? (this.me()?.alias ?? null) : input.created_by,
@@ -253,7 +303,7 @@ export class Store {
     return this.quiz(quiz.id);
   }
 
-  // Moving a quiz moves its file; its id and its results stay (Quizzes REQ25).
+  // Moving a quiz moves its file; its id and its results stay (Academy REQ25).
   async moveQuiz(id: string, course: string | null): Promise<Quiz> {
     const quiz = this.quiz(id);
     if (quiz.course === course) return quiz;
@@ -263,26 +313,33 @@ export class Store {
     return moved;
   }
 
-  // Puts a quiz at a 1-based place in its course, renumbering the course's ranks so a
-  // reorder never renames a file.
+  // Puts a quiz or a deck at a 1-based place in its course, renumbering the course's ranks
+  // so a reorder never renames a file.
   async place(id: string, place: number): Promise<void> {
-    const quiz = this.quiz(id);
-    const inCourse = this.list().quizzes.filter((held) => held.course === quiz.course && held.id !== quiz.id);
-    const at = Math.max(0, Math.min(inCourse.length, Math.floor(place) - 1));
-    inCourse.splice(at, 0, quiz);
-    await this.writeOrder(inCourse);
+    const placed = this.placed(id);
+    const others = this.inCourse(placed.item.course).filter((held) => held.item.id !== placed.item.id);
+    const at = Math.max(0, Math.min(others.length, Math.floor(place) - 1));
+    others.splice(at, 0, placed);
+    await this.writeOrder(others);
   }
 
   async reorder(course: string, ids: string[]): Promise<void> {
-    const inCourse = this.list().quizzes.filter((quiz) => quiz.course === course);
-    const byId = new Map(inCourse.map((quiz) => [quiz.id, quiz]));
+    const inCourse = this.inCourse(course);
+    const byId = new Map(inCourse.map((placed) => [placed.item.id, placed]));
     const ordered = ids.flatMap((id) => byId.get(id) ?? []);
-    await this.writeOrder([...ordered, ...inCourse.filter((quiz) => !ids.includes(quiz.id))]);
+    await this.writeOrder([...ordered, ...inCourse.filter((placed) => !ids.includes(placed.item.id))]);
   }
 
-  private async writeOrder(quizzes: Quiz[]): Promise<void> {
-    for (const [index, quiz] of quizzes.entries()) {
-      if (quiz.rank !== index + 1) await this.saveQuiz({ ...quiz, rank: index + 1 });
+  private placed(id: string): Placed {
+    const quiz = this.list().quizzes.find((held) => held.id.toLowerCase() === id.toLowerCase());
+    return quiz ? { kind: 'quiz', item: quiz } : { kind: 'deck', item: this.deck(id) };
+  }
+
+  private async writeOrder(items: Placed[]): Promise<void> {
+    for (const [index, placed] of items.entries()) {
+      if (placed.item.rank === index + 1) continue;
+      if (placed.kind === 'quiz') await this.saveQuiz({ ...placed.item, rank: index + 1 });
+      else await this.saveDeck({ ...placed.item, rank: index + 1 });
     }
   }
 
@@ -320,13 +377,72 @@ export class Store {
     await this.host.writeFile(course.path, renderCourse(course));
   }
 
-  // A course goes and its quizzes stay, as one-offs (Quizzes REQ28).
-  async removeCourse(id: string): Promise<{ course: Course; quizzes: number }> {
+  // A course goes and its quizzes and decks stay, as one-offs (Academy REQ28).
+  async removeCourse(id: string): Promise<{ course: Course; quizzes: number; decks: number }> {
     const course = this.course(id);
-    const quizzes = this.list().quizzes.filter((quiz) => quiz.course === course.id);
+    const listed = this.list();
+    const quizzes = listed.quizzes.filter((quiz) => quiz.course === course.id);
+    const decks = listed.decks.filter((deck) => deck.course === course.id);
     for (const quiz of quizzes) await this.moveQuiz(quiz.id, null);
+    for (const deck of decks) await this.moveDeck(deck.id, null);
     rmSync(this.abs(path.posix.dirname(course.path)), { recursive: true });
-    return { course, quizzes: quizzes.length };
+    return { course, quizzes: quizzes.length, decks: decks.length };
+  }
+
+  // ---- decks and their cards ------------------------------------------------------
+
+  async saveDeck(deck: Deck): Promise<void> {
+    mkdirSync(path.dirname(this.abs(deck.path)), { recursive: true });
+    await this.host.writeFile(deck.path, renderDeck(deck));
+  }
+
+  async createDeck(input: { closed?: boolean; title: string; draws_from?: string[]; course?: string | null; created_by?: string | null; rank?: number | null; made_from?: string | null; cards?: Card[] }): Promise<Deck> {
+    const title = input.title.trim();
+    if (!title) throw new HostError(400, 'a deck needs a title');
+    const listed = this.list();
+    const course = input.course ?? null;
+    const deck: Deck = {
+      id: drawId('F-', [...listed.quizzes, ...listed.decks].map((held) => held.id)),
+      title,
+      draws_from: input.draws_from ?? [],
+      made_from: input.made_from ?? null,
+      created_by: input.created_by === undefined ? (this.me()?.alias ?? null) : input.created_by,
+      proctors: [],
+      status: 'closed',
+      closed: input.closed ?? false,
+      rank: this.nextRank(course),
+      course,
+      per_session: CARDS_A_SESSION,
+      cards: input.cards ?? [],
+      path: this.freePath(this.courseFolder(course), title),
+    };
+    await this.saveDeck(deck);
+    if (input.rank !== undefined && input.rank !== null && course !== null) await this.place(deck.id, input.rank);
+    return this.deck(deck.id);
+  }
+
+  // Moving a deck moves its file; its id and everyone's sessions with it stay.
+  async moveDeck(id: string, course: string | null): Promise<Deck> {
+    const deck = this.deck(id);
+    if (deck.course === course) return deck;
+    const moved: Deck = { ...deck, course, rank: this.nextRank(course), path: this.freePath(this.courseFolder(course), deck.title) };
+    renameSync(this.abs(deck.path), this.abs(moved.path));
+    await this.saveDeck(moved);
+    return moved;
+  }
+
+  removeDeck(id: string): Deck {
+    const deck = this.deck(id);
+    rmSync(this.abs(deck.path));
+    return deck;
+  }
+
+  newCardId(deck: Pick<Deck, 'cards'>, taken: string[] = []): string {
+    return drawId('c-', [...deck.cards.map((card) => card.id), ...taken]).toLowerCase();
+  }
+
+  blankCard(deck: Deck): Card {
+    return { id: this.newCardId(deck), front: '', back: '', reference: '' };
   }
 
   // ---- questions ------------------------------------------------------------------
@@ -391,10 +507,132 @@ export class Store {
     writeFileSync(path.join(folder, `${attempt.id}.yaml`), renderAttempt(attempt));
   }
 
+  // ---- study sessions with a deck -----------------------------------------------------
+
+  private reviewsIn(folder: string, shared: boolean): Array<Review & { shared: boolean }> {
+    const reviews: Array<Review & { shared: boolean }> = [];
+    for (const person of listDir(folder)) {
+      const held = shared ? path.join(folder, person, REVIEWS_FOLDER) : path.join(folder, person);
+      for (const name of listDir(held)) {
+        if (!name.endsWith('.yaml')) continue;
+        try {
+          reviews.push({ ...parseReview(readFileSync(path.join(held, name), 'utf8')), shared });
+        } catch {
+          // a file that does not read is left out of every sum
+        }
+      }
+    }
+    return reviews;
+  }
+
+  // A person's sessions with a deck: those committed under their name, and this machine's own
+  // under their name or nobody's. Nobody else's are read for anything this person is shown.
+  reviewsOf(alias: string | null, deck?: string): Array<Review & { shared: boolean }> {
+    const shared = alias ? this.reviewsIn(path.join(this.host.workspace, 'results'), true).filter((review) => review.by === alias) : [];
+    const local = this.reviewsIn(path.join(this.host.workspace, 'local', REVIEWS_FOLDER), false).filter((review) => review.by === LOCAL_PERSON || review.by === alias);
+    const all = [...shared, ...local];
+    return deck ? all.filter((review) => review.deck === deck) : all;
+  }
+
+  newReviewId(): string {
+    const stamp = new Date()
+      .toISOString()
+      .replace(/[-:.TZ]/g, '')
+      .slice(0, 14);
+    return drawId(`r-${stamp}-`).toLowerCase();
+  }
+
+  // Someone signed in keeps their sessions with the project, so where they are in a deck follows
+  // them to any machine; with nobody selected, they stay on this one.
+  async saveReview(review: Review, shared: boolean): Promise<void> {
+    if (shared) {
+      await this.host.writeFile(`${this.workspaceRel}/results/${review.by}/${REVIEWS_FOLDER}/${review.id}.yaml`, renderReview(review));
+      return;
+    }
+    const folder = path.join(this.host.workspace, 'local', REVIEWS_FOLDER, review.by);
+    mkdirSync(folder, { recursive: true });
+    writeFileSync(path.join(folder, `${review.id}.yaml`), renderReview(review));
+  }
+
+  // Who a study session is by, and whether it is committed: a person with a name in the
+  // project, else nobody in particular on this machine. An agent never studies.
+  studier(): { by: string; shared: boolean } {
+    const me = this.me();
+    if (me?.agent) throw new HostError(403, 'only people study, so an agent has no study sessions');
+    return me?.alias ? { by: me.alias, shared: true } : { by: LOCAL_PERSON, shared: false };
+  }
+
+  // ---- from the Quizzes plugin ---------------------------------------------------------
+
+  // What Quizzes, this plugin's name before 0.3.0, left in the project: the folder the
+  // framework declares as its own, and its workspace's results and practice files.
+  quizzesLeft(): { folder: string | null; files: string[]; results: string[] } {
+    const declared = this.host.context().framework.folders.find((folder) => folder.ownedBy === QUIZZES_OWNER)?.name ?? null;
+    const walk = (rel: string): string[] => {
+      const out: string[] = [];
+      for (const name of listDir(this.abs(rel))) {
+        if (name.startsWith('.')) continue;
+        const inner = `${rel}/${name}`;
+        if (statSync(this.abs(inner)).isDirectory()) out.push(...walk(inner));
+        else out.push(inner);
+      }
+      return out;
+    };
+    const files = declared && declared !== this.folderName() ? walk(declared).filter((rel) => rel.endsWith('.md')) : [];
+    const results = [...walk(`${QUIZZES_WORKSPACE}/results`), ...walk(`${QUIZZES_WORKSPACE}/local`)];
+    return { folder: declared, files, results };
+  }
+
+  // Brings everything Quizzes kept into Academy: each quiz and course into Academy's folder,
+  // under the same names where they are free, and every result, enrollment, and practice
+  // file into Academy's workspace. Ids stay, so every attempt still names its quiz. The old
+  // folder's entry in the framework is the framework editor's to take out.
+  moveFromQuizzes(): { quizzes: number; courses: number; results: number; folder: string | null } {
+    const left = this.quizzesLeft();
+    let quizzes = 0;
+    let courses = 0;
+    const target = this.folderName();
+    mkdirSync(this.abs(target), { recursive: true });
+    if (left.folder && left.folder !== target) {
+      for (const name of listDir(this.abs(left.folder))) {
+        if (name.startsWith('.')) continue;
+        const from = `${left.folder}/${name}`;
+        const isCourse = statSync(this.abs(from)).isDirectory();
+        let to = `${target}/${name}`;
+        for (let turn = 2; existsSync(this.abs(to)); turn += 1) to = isCourse ? `${target}/${name}-${turn}` : `${target}/${name.replace(/\.md$/, '')}-${turn}.md`;
+        renameSync(this.abs(from), this.abs(to));
+        if (isCourse) {
+          courses += 1;
+          quizzes += listDir(this.abs(to)).filter((inner) => inner.endsWith('.md') && inner !== COURSE_FILE).length;
+        } else if (name.endsWith('.md')) quizzes += 1;
+      }
+    }
+    let results = 0;
+    for (const part of ['results', 'local']) {
+      const from = this.abs(`${QUIZZES_WORKSPACE}/${part}`);
+      if (!existsSync(from)) continue;
+      const moveInto = (source: string, destination: string): void => {
+        mkdirSync(destination, { recursive: true });
+        for (const name of listDir(source)) {
+          const inner = path.join(source, name);
+          const outer = path.join(destination, name);
+          if (statSync(inner).isDirectory()) moveInto(inner, outer);
+          else if (!existsSync(outer)) {
+            renameSync(inner, outer);
+            results += 1;
+          }
+        }
+        if (listDir(source).length === 0) rmSync(source, { recursive: true });
+      };
+      moveInto(from, path.join(this.host.workspace, part));
+    }
+    return { quizzes, courses, results, folder: left.folder && left.folder !== target ? left.folder : null };
+  }
+
   // ---- enrollments -------------------------------------------------------------------
 
   // A person's own file beside their attempts, so two people enrolling never conflict
-  // (Quizzes REQ41): the courses they are in, each with when they enrolled.
+  // (Academy REQ41): the courses they are in, each with when they enrolled.
   enrollmentsOf(alias: string): Record<string, string> {
     try {
       const held = parseYaml(readFileSync(path.join(this.host.workspace, 'results', alias, ENROLLMENTS_FILE), 'utf8')) as { courses?: Record<string, string> } | null;

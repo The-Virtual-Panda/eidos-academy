@@ -1,8 +1,19 @@
 // What the page and the commands both ask of the plugin, and the soft permission over it:
-// who is shown what (Quizzes REQ23). The files stay readable by anyone with the project.
+// who is shown what (Academy REQ23). The files stay readable by anyone with the project.
 import { HostError, type Host } from 'eidosmd/plugin';
 import {
   askable,
+  cardProblems,
+  cardsAcross,
+  cardsFromQuiz,
+  cardsToStudy,
+  deckProgress,
+  makeReview,
+  parseDeck,
+  renderDeck,
+  standings,
+  studiable,
+  STUDY_MODES,
   canEdit,
   canManage,
   canSeeCourse,
@@ -20,7 +31,12 @@ import {
   type Attempt,
   type AttemptKind,
   type AttemptMode,
+  type Card,
   type Course,
+  type Deck,
+  type DeckProgress,
+  type Review,
+  type StudyMode,
   type Question,
   type Quiz,
   type QuizStatus,
@@ -44,6 +60,27 @@ export interface QuizRow {
   may_manage: boolean;
 }
 
+export interface DeckRow {
+  id: string;
+  title: string;
+  path: string;
+  course: string | null;
+  course_title: string | null;
+  place: number | null;
+  draws_from: string[];
+  cards: number;
+  created_by: string | null;
+  created_by_name: string | null;
+  status: QuizStatus;
+  // the person's own, from their sessions
+  learned: number;
+  learning: number;
+  unseen: number;
+  last_studied: string | null;
+  may_edit: boolean;
+  may_manage: boolean;
+}
+
 export type Api = ReturnType<typeof makeApi>;
 
 export function makeApi(host: Host) {
@@ -63,20 +100,26 @@ export function makeApi(host: Host) {
 
   const nameOf = (alias: string | null): string | null => (alias === null ? null : (store.people().find((person) => person.alias === alias)?.name ?? alias));
 
+  // Each quiz's and deck's place in its course, which the two share.
+  const placesOf = (): Map<string, number> => {
+    const places = new Map<string, number>();
+    for (const course of store.list().courses) store.inCourse(course.id).forEach((placed, index) => places.set(placed.item.id, index + 1));
+    return places;
+  };
+
+  const courseOrder = (courses: Course[]) => (a: { course: string | null; rank: number; title: string }, b: { course: string | null; rank: number; title: string }) =>
+    (courses.find((course) => course.id === a.course)?.title ?? '\uffff').localeCompare(courses.find((course) => course.id === b.course)?.title ?? '\uffff') ||
+    a.rank - b.rank ||
+    a.title.localeCompare(b.title);
+
   const rows = (): QuizRow[] => {
     const { quizzes, courses } = store.list();
     const me = store.me();
     const official = store.officialAttempts();
-    const seen = new Map<string, number>();
-    const inOrder = [...quizzes].sort(
-      (a, b) =>
-        (courses.find((course) => course.id === a.course)?.title ?? '\uffff').localeCompare(courses.find((course) => course.id === b.course)?.title ?? '\uffff') ||
-        a.rank - b.rank ||
-        a.title.localeCompare(b.title),
-    );
+    const places = placesOf();
+    const inOrder = [...quizzes].sort(courseOrder(courses));
     return inOrder.map((quiz) => {
-      const place = quiz.course ? (seen.get(quiz.course) ?? 0) + 1 : null;
-      if (quiz.course && place) seen.set(quiz.course, place);
+      const place = quiz.course ? (places.get(quiz.id) ?? null) : null;
       return {
         id: quiz.id,
         title: quiz.title,
@@ -95,6 +138,47 @@ export function makeApi(host: Host) {
       };
     });
   };
+
+  const deckRows = (): DeckRow[] => {
+    const { decks, courses } = store.list();
+    const alias = store.me()?.alias ?? null;
+    const mine = store.reviewsOf(alias);
+    const places = placesOf();
+    return [...decks].sort(courseOrder(courses)).map((deck) => {
+      const progress = deckProgress(
+        deck,
+        mine.filter((review) => review.deck === deck.id),
+      );
+      return {
+        id: deck.id,
+        title: deck.title,
+        path: deck.path,
+        course: deck.course,
+        course_title: courses.find((course) => course.id === deck.course)?.title ?? null,
+        place: deck.course ? (places.get(deck.id) ?? null) : null,
+        draws_from: deck.draws_from,
+        cards: studiable(deck).length,
+        created_by: deck.created_by,
+        created_by_name: nameOf(deck.created_by),
+        status: deck.status,
+        learned: progress.learned,
+        learning: progress.learning,
+        unseen: progress.new,
+        last_studied: progress.last_studied,
+        may_edit: canEdit(deck, store.access()),
+        may_manage: canManage(deck, store.access()),
+      };
+    });
+  };
+
+  const validCard = (card: Card): Card => {
+    const problems = cardProblems(card);
+    if (problems.length > 0) throw new HostError(400, `this card can't be saved yet: ${problems.join('; ')}`);
+    return { id: card.id, front: String(card.front ?? ''), back: String(card.back ?? ''), reference: String(card.reference ?? '') };
+  };
+
+  // What a person studies from a deck: an open one, or a closed one they are trying out as its editor.
+  const mayStudy = (deck: Deck): boolean => deck.status === 'open' || canEdit(deck, store.access());
 
   const requireEdit = (thing: { created_by: string | null }, what: string): void => {
     if (!canEdit(thing, store.access())) throw new HostError(403, `only ${what}'s creator, its proctors, and the project's owners change it`);
@@ -129,6 +213,12 @@ export function makeApi(host: Host) {
         me: me ? { name: me.name, alias: me.alias, owner: me.owner } : null,
         folder: store.folderName(),
         quizzes: rows(),
+        decks: deckRows(),
+        // what Quizzes, Academy's name before 0.3.0, left in the project, for the page to offer the move
+        quizzes_left: (() => {
+          const left = store.quizzesLeft();
+          return left.files.length + left.results.length > 0 ? { folder: left.folder, quizzes: left.files.length, results: left.results.length, may_move: store.access().owner } : null;
+        })(),
         courses: store
           .list()
           .courses.map((course) => ({
@@ -326,7 +416,9 @@ export function makeApi(host: Host) {
       const me = store.me();
       const alias = me?.alias ?? null;
       const quizzes = rows().filter((row) => row.course === course.id);
+      const decks = deckRows().filter((row) => row.course === course.id);
       const taken = quizzes.filter((row) => row.best !== null);
+      const items = [...quizzes.map((row) => ({ kind: 'quiz' as const, row })), ...decks.map((row) => ({ kind: 'deck' as const, row }))].sort((a, b) => (a.row.place ?? 0) - (b.row.place ?? 0));
       const sessions = store.blueprintsOf(course.study_plan);
       const done = alias ? store.sessionsDone(alias) : {};
       const enrolled = store.enrolledIn(course.id);
@@ -341,10 +433,15 @@ export function makeApi(host: Host) {
           .filter((person) => !person.agent && person.alias)
           .map((person) => ({ alias: person.alias!, name: person.name })),
         quizzes,
+        decks,
+        items,
         progress: {
           taken: taken.length,
           of: quizzes.length,
           average_best: taken.length > 0 ? taken.reduce((sum, row) => sum + (row.best ?? 0), 0) / taken.length : null,
+          cards_learned: decks.reduce((sum, row) => sum + row.learned, 0),
+          cards_learning: decks.reduce((sum, row) => sum + row.learning, 0),
+          cards: decks.reduce((sum, row) => sum + row.cards, 0),
           sessions_done: sessions.filter((session) => done[session.id]).length,
           sessions: sessions.length,
         },
@@ -355,7 +452,7 @@ export function makeApi(host: Host) {
 
     // ---- enrolling, and a person's way through a course ----
 
-    // Anyone may enroll, a course's creator and its proctors too (Quizzes REQ41).
+    // Anyone may enroll, a course's creator and its proctors too (Academy REQ41).
     async enroll(id: string) {
       const course = store.course(id);
       const person = store.signer('Enrolling');
@@ -439,6 +536,7 @@ export function makeApi(host: Host) {
       const done = alias ? store.sessionsDone(alias) : {};
       return {
         quizzes: rows().filter((row) => row.draws_from.includes(blueprintId)),
+        decks: deckRows().filter((row) => row.draws_from.includes(blueprintId)),
         plan: course
           ? {
               course: course.title,
@@ -454,6 +552,263 @@ export function makeApi(host: Host) {
     async setSessionDone(blueprint: string, done: boolean) {
       const person = store.signer();
       await store.setSessionDone(person.alias!, blueprint, done);
+    },
+
+    // ---- decks ----
+
+    // A deck with what this person may do with it, where they stand in it, and each card's standing.
+    deck(id: string) {
+      const deck = store.deck(id);
+      const alias = store.me()?.alias ?? null;
+      const mine = store.reviewsOf(alias, deck.id);
+      const listed = store.list();
+      const inCourse = deck.course ? store.inCourse(deck.course) : [];
+      const course = listed.courses.find((held) => held.id === deck.course) ?? null;
+      const held = standings(deck, mine);
+      const studier = (() => {
+        try {
+          return store.studier();
+        } catch {
+          return null;
+        }
+      })();
+      return {
+        deck,
+        created_by_name: nameOf(deck.created_by),
+        proctor_names: Object.fromEntries(deck.proctors.map((alias) => [alias, nameOf(alias)])),
+        studiable: studiable(deck).length,
+        course: course ? { id: course.id, title: course.title } : null,
+        place: deck.course ? inCourse.findIndex((placed) => placed.item.id === deck.id) + 1 : null,
+        of: inCourse.length,
+        made_from: deck.made_from ? (listed.quizzes.find((quiz) => quiz.id === deck.made_from) ? { id: deck.made_from, title: listed.quizzes.find((quiz) => quiz.id === deck.made_from)!.title } : { id: deck.made_from, title: null }) : null,
+        may: { edit: canEdit(deck, store.access()), manage: canManage(deck, store.access()), study: mayStudy(deck) && studier !== null, shared: studier?.shared ?? false },
+        progress: deckProgress(deck, mine),
+        missed_last: cardsToStudy(deck, mine, 'missed').length,
+        standings: Object.fromEntries([...held.entries()]),
+        quizzes: listed.quizzes.map((quiz) => ({ id: quiz.id, title: quiz.title, questions: askable(quiz).length })),
+        people: store
+          .people()
+          .filter((person) => !person.agent && person.alias)
+          .map((person) => ({ alias: person.alias!, name: person.name })),
+      };
+    },
+
+    // The cards a study session takes, from one deck, or across every open deck (or a course's).
+    study(input: { deck?: string | null; course?: string | null; mode?: StudyMode | null }) {
+      const mode: StudyMode = input.mode ?? 'next';
+      if (!STUDY_MODES.includes(mode)) throw new HostError(400, 'a study session takes the next cards, the missed ones, or the whole deck');
+      const alias = store.me()?.alias ?? null;
+      const mine = store.reviewsOf(alias);
+      if (input.deck) {
+        const deck = store.deck(input.deck);
+        if (!mayStudy(deck)) throw new HostError(409, 'this deck is closed');
+        const byId = new Map(deck.cards.map((card) => [card.id, card]));
+        const held = standings(deck, mine.filter((review) => review.deck === deck.id));
+        return {
+          title: deck.title,
+          deck: deck.id,
+          mode,
+          cards: cardsToStudy(
+            deck,
+            mine.filter((review) => review.deck === deck.id),
+            mode,
+          ).map((card) => ({ deck: deck.id, deck_title: deck.title, card: byId.get(card)!, state: held.get(card)?.state ?? 'new' })),
+        };
+      }
+      const decks = store
+        .list()
+        .decks.filter((deck) => deck.status === 'open' && (input.course ? deck.course === input.course : true));
+      const picked = cardsAcross(
+        decks.map((deck) => ({ deck, reviews: mine.filter((review) => review.deck === deck.id) })),
+        20,
+      );
+      const byDeck = new Map(decks.map((deck) => [deck.id, { deck, cards: new Map(deck.cards.map((card) => [card.id, card])), held: standings(deck, mine.filter((review) => review.deck === deck.id)) }]));
+      return {
+        title: input.course ? (store.course(input.course).title) : 'Your decks',
+        deck: null,
+        mode: 'next' as StudyMode,
+        cards: picked.map(({ deck, card }) => {
+          const held = byDeck.get(deck)!;
+          return { deck, deck_title: held.deck.title, card: held.cards.get(card)!, state: held.held.get(card)?.state ?? 'new' };
+        }),
+      };
+    },
+
+    // A study session saved: one file per deck it touched, signed by the person studying.
+    async saveStudy(input: { mode: StudyMode; started_at: string; answers: Array<{ deck: string; card: string; got: boolean; at?: string }> }) {
+      if (!Array.isArray(input.answers) || input.answers.length === 0) throw new HostError(400, 'a study session answers at least one card');
+      const { by, shared } = store.studier();
+      const completedAt = new Date().toISOString();
+      const decks = [...new Set(input.answers.map((answer) => answer.deck))];
+      const saved: Review[] = [];
+      const results = [];
+      for (const id of decks) {
+        const deck = store.deck(id);
+        if (!mayStudy(deck)) throw new HostError(409, `${deck.title} is closed`);
+        const before = deckProgress(deck, store.reviewsOf(by === LOCAL_PERSON ? null : by, deck.id));
+        let review: Review;
+        try {
+          review = makeReview({
+            id: store.newReviewId(),
+            deck,
+            by,
+            mode: decks.length > 1 ? 'next' : input.mode,
+            startedAt: input.started_at || completedAt,
+            completedAt,
+            answers: input.answers.filter((answer) => answer.deck === id),
+          });
+        } catch (cause) {
+          throw new HostError(409, cause instanceof Error ? cause.message : String(cause));
+        }
+        await store.saveReview(review, shared);
+        saved.push(review);
+        const after = deckProgress(deck, store.reviewsOf(by === LOCAL_PERSON ? null : by, deck.id));
+        results.push({ deck: deck.id, title: deck.title, learned: after.learned, gained: after.learned - before.learned, of: after.of, left: after.of - after.learned });
+      }
+      const finals = new Map<string, { deck: string; card: Card; got: boolean }>();
+      for (const review of saved) for (const answer of review.answers) finals.set(`${review.deck}/${answer.card.id}`, { deck: review.deck, card: answer.card, got: answer.got });
+      const missed = [...finals.values()].filter((held) => !held.got);
+      return {
+        shared,
+        cards: finals.size,
+        got: finals.size - missed.length,
+        still_learning: missed.length,
+        minutes: Math.max(1, Math.round((Date.parse(completedAt) - Date.parse(input.started_at || completedAt)) / 60000)),
+        decks: results,
+        missed: missed.map((held) => ({ deck: held.deck, front: held.card.front, back: held.card.back })),
+      };
+    },
+
+    // Keep studying: every deck with where the person stands in it, and the totals across them.
+    keepStudying() {
+      const decks = deckRows().filter((row) => row.status === 'open' || row.may_edit);
+      const sum = (key: 'learned' | 'learning' | 'unseen' | 'cards'): number => decks.reduce((total, row) => total + row[key], 0);
+      return { decks, learned: sum('learned'), learning: sum('learning'), unseen: sum('unseen'), cards: sum('cards'), may_study: (() => { try { store.studier(); return true; } catch { return false; } })() };
+    },
+
+    async createDeck(input: { title: string; draws_from?: string[]; course?: string | null; place?: number | null; from_quiz?: string | null }) {
+      if (input.course) requireEdit(store.course(input.course), 'a course');
+      const quiz = input.from_quiz ? store.quiz(input.from_quiz) : null;
+      const taken: string[] = [];
+      const cards = quiz
+        ? cardsFromQuiz(quiz, () => {
+            const id = store.newCardId({ cards: [] }, taken);
+            taken.push(id);
+            return id;
+          })
+        : [];
+      return store.createDeck({
+        title: input.title,
+        draws_from: input.draws_from && input.draws_from.length > 0 ? input.draws_from : (quiz?.draws_from ?? []),
+        course: input.course ?? quiz?.course ?? null,
+        rank: input.place ?? null,
+        made_from: quiz?.id ?? null,
+        cards,
+      });
+    },
+
+    async updateDeck(id: string, patch: { title?: string; draws_from?: string[]; proctors?: string[]; created_by?: string | null; course?: string | null; status?: QuizStatus; per_session?: number }) {
+      let deck = store.deck(id);
+      requireEdit(deck, 'a deck');
+      if (patch.status === 'open' && studiable(deck).length === 0) throw new HostError(400, 'add a card before opening this deck');
+      if ((patch.proctors !== undefined || patch.created_by !== undefined) && !canManage(deck, store.access())) throw new HostError(403, "only a deck's creator and the project's owners change who holds it");
+      if (patch.per_session !== undefined && (!Number.isInteger(patch.per_session) || patch.per_session < 1 || patch.per_session > 500)) throw new HostError(400, 'a session takes 1 to 500 cards');
+      if (patch.course !== undefined) {
+        if (patch.course) requireEdit(store.course(patch.course), 'a course');
+        deck = await store.moveDeck(deck.id, patch.course);
+      }
+      await store.saveDeck({
+        ...deck,
+        ...(patch.status ? { closed: patch.status === 'closed' } : {}),
+        ...(patch.title !== undefined ? { title: patch.title.trim() || deck.title } : {}),
+        ...(patch.draws_from ? { draws_from: patch.draws_from } : {}),
+        ...(patch.proctors ? { proctors: patch.proctors } : {}),
+        ...(patch.created_by !== undefined ? { created_by: patch.created_by } : {}),
+        ...(patch.per_session !== undefined ? { per_session: patch.per_session } : {}),
+      });
+      return store.deck(id);
+    },
+
+    async saveCard(id: string, card: Card) {
+      const deck = store.deck(id);
+      requireEdit(deck, 'a deck');
+      const valid = validCard(card);
+      const at = deck.cards.findIndex((held) => held.id === valid.id);
+      const cards = [...deck.cards];
+      if (at >= 0) cards[at] = valid;
+      else cards.push(valid);
+      await store.saveDeck({ ...deck, cards });
+      return store.deck(id);
+    },
+
+    async removeCard(id: string, cardId: string) {
+      const deck = store.deck(id);
+      requireEdit(deck, 'a deck');
+      await store.saveDeck({ ...deck, cards: deck.cards.filter((card) => card.id !== cardId) });
+      return store.deck(id);
+    },
+
+    async orderCards(id: string, ids: string[]) {
+      const deck = store.deck(id);
+      requireEdit(deck, 'a deck');
+      const byId = new Map(deck.cards.map((card) => [card.id, card]));
+      await store.saveDeck({ ...deck, cards: [...ids.flatMap((held) => byId.get(held) ?? []), ...deck.cards.filter((card) => !ids.includes(card.id))] });
+      return store.deck(id);
+    },
+
+    // A quiz's questions added to a deck as cards, skipping any whose front the deck has already.
+    async cardsFromQuiz(id: string, quizId: string) {
+      const deck = store.deck(id);
+      requireEdit(deck, 'a deck');
+      const quiz = store.quiz(quizId);
+      const fronts = new Set(deck.cards.map((card) => card.front.trim().toLowerCase()));
+      const taken: string[] = [];
+      const made = cardsFromQuiz(quiz, () => {
+        const next = store.newCardId(deck, taken);
+        taken.push(next);
+        return next;
+      }).filter((card) => !fronts.has(card.front.toLowerCase()));
+      await store.saveDeck({ ...deck, made_from: deck.made_from ?? quiz.id, cards: [...deck.cards, ...made] });
+      return { deck: store.deck(id), added: made.length };
+    },
+
+    deckSource(id: string) {
+      const deck = store.deck(id);
+      if (!canEdit(deck, store.access())) throw new HostError(403, "only a deck's creator, its proctors, and the project's owners change it");
+      return { text: renderDeck(deck) };
+    },
+
+    async saveDeckSource(id: string, text: string) {
+      const deck = store.deck(id);
+      requireEdit(deck, 'a deck');
+      let read: Deck;
+      try {
+        read = parseDeck(text, deck.path, deck.course);
+      } catch (cause) {
+        throw new HostError(400, cause instanceof Error ? `this file can't be saved: ${cause.message}` : String(cause));
+      }
+      if (read.id !== deck.id) throw new HostError(400, `this file's id is ${deck.id}, and an id is permanent`);
+      await store.saveDeck(read);
+      return store.deck(id);
+    },
+
+    async removeDeck(id: string) {
+      if (!canManage(store.deck(id), store.access())) throw new HostError(403, "only a deck's creator and the project's owners delete it");
+      return store.removeDeck(id);
+    },
+
+    // ---- from Quizzes ----
+
+    moveFromQuizzes() {
+      if (!store.access().owner) throw new HostError(403, "moving what Quizzes kept into Academy is for the project's owners");
+      const moved = store.moveFromQuizzes();
+      return {
+        ...moved,
+        then: [
+          ...(moved.folder ? [`eidos configure:folder remove ${moved.folder} --yes   # the Quizzes folder's entry, empty now`] : []),
+          'eidos plugin disable quizzes   # Quizzes is Academy now',
+        ],
+      };
     },
 
     // what New quiz and a course's links offer to pick from

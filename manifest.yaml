@@ -1,13 +1,13 @@
 # The plugin's manifest, read by the host before any of its code runs.
-name: quizzes
-title: Quizzes
-description: "Build multiple-choice quizzes on your project's content, group them into ordered courses, practice locally, take them officially, and keep every score over time"
-version: 0.2.0
+name: academy
+title: Academy
+description: "Build quizzes and flashcard decks on your project's content, group them into ordered courses, and follow how people are doing over time"
+version: 0.3.0
 min_host: 0.18.0
 folder:
-  kind: quizzes
-  name: quizzes
-  description: "The quizzes on this project's content, one markdown file each, and the courses that group them, kept by the Quizzes plugin"
+  kind: academy
+  name: academy
+  description: "The quizzes and flashcard decks on this project's content, one markdown file each, and the courses that group them, kept by the Academy plugin"
 files:
   - path: '{workspace}/local/**'
     merge: local
@@ -16,4 +16,4 @@ files:
   - path: '{folder}/**'
     merge: text
 settings: []
-agents: "Quizzes on the project's content live in the Quizzes plugin's folder, grouped into courses or kept as one-offs, with official results in its workspace. Run `eidos instructions quizzes` before writing a quiz or a study plan; `eidos quizzes` lists and edits them, and lessons, wiki pages, and study plans stay blueprints in the project's collections."
+agents: "Quizzes and flashcard decks on the project's content live in the Academy plugin's folder, grouped into courses or kept as one-offs, with people's results and study sessions in its workspace. Run `eidos instructions academy` before writing a quiz, a deck, or a study plan; `eidos academy` lists and edits them, and lessons, wiki pages, and study plans stay blueprints in the project's collections."

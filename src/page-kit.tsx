@@ -1,5 +1,5 @@
-// What the quiz's own pages are drawn with. The list and the builder use the host's kit;
-// a quiz, a course, its scores, and a result take Bible Academy's look (Quizzes REQ36),
+// What Academy's own pages are drawn with. The list and the builders use the host's kit;
+// a quiz, a deck, a course, its scores, and a result take Bible Academy's look (Academy REQ36),
 // a surface of the plugin's own, styled only with the page's tokens so a theme holds.
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type JSX, type ReactNode } from 'react';
 import { Notice, SkeletonBar, Stack, useCrumbs, useFileChanges, usePluginHost, type Crumb, type PluginHost } from 'eidosmd/page';
@@ -12,6 +12,7 @@ export const CSS = `
 .qz-eyebrow { display: inline-flex; align-items: center; gap: 8px; padding: 4px 12px; margin-bottom: 12px; border-radius: 999px; background: var(--color-accent-soft); color: var(--color-accent) !important; font-size: var(--text-xs); font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }
 .qz-eyebrow::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .qz-h1 { margin: 0 0 6px; font-size: var(--text-6xl); font-weight: 700; line-height: 1.15; letter-spacing: -.03em; }
+.qz-h1 span { color: var(--color-accent); }
 .qz-h2 { margin: 34px 0 12px; font-size: var(--text-3xl); font-weight: 700; letter-spacing: -.02em; }
 .qz-card { min-width: 0; padding: 18px 20px; background: var(--color-raised); border: 1px solid var(--color-line); border-radius: var(--radius-3xl); }
 .qz-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
@@ -103,6 +104,22 @@ export const CSS = `
 .qz-aux { padding: 0 12px 12px; font-size: var(--text-base); }
 .qz-enroll { margin-bottom: 18px; }
 .qz-head-actions { display: inline-flex; flex: none; align-items: center; gap: 8px; }
+.qz-qrow span.qz-badge:last-child { display: inline-flex; flex: none; align-self: flex-start; }
+.qz-qrow .qz-clamp { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.qz-flash { display: flex; flex-direction: column; justify-content: center; gap: 14px; width: 100%; min-height: 300px; margin-top: 18px; padding: 36px 40px; color: var(--color-fg); font: inherit; text-align: center; cursor: pointer; }
+.qz-flash:disabled { cursor: default; }
+.qz-flash:hover:not(:disabled) { border-color: var(--color-accent); }
+.qz-flash-front { font-size: var(--text-4xl); font-weight: 700; line-height: 1.35; letter-spacing: -.02em; white-space: pre-wrap; }
+.qz-flash-back { font-size: var(--text-xl); line-height: 1.5; white-space: pre-wrap; }
+.qz-flash-rule { display: block; height: 1px; margin: 6px 25%; background: var(--color-line); }
+.qz-flash-preview { padding: 14px 16px; text-align: center; }
+.qz-flash-preview .qz-label { text-align: left; }
+.qz-flash-preview .qz-flash-front { font-size: var(--text-xl); }
+.qz-grades { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 18px; }
+.qz-grades .qz-option { display: flex; flex-direction: column; align-items: center; gap: 2px; margin: 0; text-align: center; }
+.qz-quiet-link { padding: 0; border: 0; background: none; font: inherit; cursor: pointer; }
+.qz-quiet-link:hover { color: var(--color-fg); text-decoration: underline; }
+.qz-pre { margin: 8px 0 0; padding: 8px 10px; overflow-x: auto; border-radius: var(--radius-md); background: var(--color-raised); font-family: var(--font-mono); font-size: var(--text-sm); white-space: pre; }
 .qz-inline { display: block; width: 100%; margin: -2px -6px; padding: 2px 6px; box-sizing: content-box; border: 0; border-radius: var(--radius-md); background: none; color: inherit; font: inherit; letter-spacing: inherit; line-height: inherit; text-align: left; white-space: pre-wrap; cursor: text; }
 .qz-inline:hover { background: var(--color-hover); }
 .qz-inline-empty { color: var(--color-faint); }

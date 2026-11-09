@@ -52,7 +52,7 @@ export type AttemptKind = 'official' | 'practice';
 export type AttemptMode = 'whole' | 'missed' | 'unseen';
 
 export interface AttemptAnswer {
-  // a copy of the question as it was asked (Quizzes REQ17)
+  // a copy of the question as it was asked (Academy REQ17)
   question: Omit<Question, 'answer'> & { answer: number };
   chosen: number;
 }
@@ -252,7 +252,7 @@ export function askable(quiz: Pick<Quiz, 'questions'>): Question[] {
   return quiz.questions.filter((question) => questionProblems(question).length === 0);
 }
 
-// A quiz is open by default once it has a question to ask (Quizzes REQ40).
+// A quiz is open by default once it has a question to ask (Academy REQ40).
 export function statusOf(quiz: Pick<Quiz, 'closed' | 'questions'>): QuizStatus {
   return quiz.closed || askable(quiz).length === 0 ? 'closed' : 'open';
 }
@@ -276,6 +276,335 @@ export function parseCourse(source: string, path: string): Course {
 
 export function renderCourse(course: Course): string {
   return joinFrontmatter({ id: course.id, title: course.title, created_by: course.created_by, content: course.content, study_plan: course.study_plan }, course.description);
+}
+
+// ---- a deck's file --------------------------------------------------------------------
+
+// A deck is a quiz's sibling: one file in the same folder and courses, marked `type: deck`,
+// its cards in the order they were written. Nothing in it, or in anything kept about it,
+// says when a card should be studied: a person studies whenever they like.
+export const DECK_TYPE = 'deck';
+export const CARDS_A_SESSION = 20;
+
+export interface Card {
+  id: string;
+  front: string;
+  back: string;
+  reference: string;
+}
+
+export interface Deck {
+  id: string;
+  title: string;
+  draws_from: string[];
+  // the quiz its first cards were made from, when they were
+  made_from: string | null;
+  created_by: string | null;
+  proctors: string[];
+  status: QuizStatus;
+  closed: boolean;
+  rank: number;
+  course: string | null;
+  // how many cards Study takes at a time
+  per_session: number;
+  cards: Card[];
+  path: string;
+}
+
+// A card reads as a page, the way a question does:
+//
+//   ## c-abc12
+//
+//   What does mishkan mean?
+//
+//   **Back:** "Dwelling place," from shakan, to dwell.
+//
+//   **Reference:** Lesson 10, section A
+const BACK = /^\*\*Back:\*\*\s*(.*)$/;
+
+export function parseCards(body: string): Card[] {
+  const cards: Card[] = [];
+  let held: { id: string; front: string[]; back: string[]; reference: string; part: 'front' | 'back' | 'done' } | null = null;
+  const finish = (): void => {
+    if (!held) return;
+    cards.push({ id: held.id, front: held.front.join('\n').trim(), back: held.back.join('\n').trim(), reference: held.reference });
+    held = null;
+  };
+  for (const line of body.split(/\r?\n/)) {
+    const heading = /^##\s+(\S+)\s*$/.exec(line);
+    if (heading) {
+      finish();
+      held = { id: heading[1]!, front: [], back: [], reference: '', part: 'front' };
+      continue;
+    }
+    if (!held) continue;
+    const back = BACK.exec(line);
+    if (back) {
+      held.back.push(back[1]!);
+      held.part = 'back';
+      continue;
+    }
+    const reference = REFERENCE.exec(line);
+    if (reference) {
+      held.reference = reference[1]!.trim();
+      held.part = 'done';
+      continue;
+    }
+    if (held.part === 'front') held.front.push(line);
+    else if (held.part === 'back') held.back.push(line);
+  }
+  finish();
+  return cards;
+}
+
+export function renderCards(cards: Card[]): string {
+  return cards
+    .map((card) => {
+      const parts = [`## ${card.id}`, card.front.trim()];
+      if (card.back.trim()) parts.push(`**Back:** ${card.back.trim()}`);
+      if (card.reference.trim()) parts.push(`**Reference:** ${card.reference.replace(/\s*\n\s*/g, ' ').trim()}`);
+      return parts.join('\n\n');
+    })
+    .join('\n\n');
+}
+
+// What is wrong with a card, in words a person acts on; empty when it can be studied.
+export function cardProblems(card: Card): string[] {
+  const problems: string[] = [];
+  if (!card.front.trim()) problems.push('it has no front');
+  if (!card.back.trim()) problems.push('it has no back');
+  return problems;
+}
+
+export function studiable(deck: Pick<Deck, 'cards'>): Card[] {
+  return deck.cards.filter((card) => cardProblems(card).length === 0);
+}
+
+// A deck is open once it has a card to study, unless a person closed it, as a quiz is.
+export function deckStatusOf(deck: Pick<Deck, 'closed' | 'cards'>): QuizStatus {
+  return deck.closed || studiable(deck).length === 0 ? 'closed' : 'open';
+}
+
+// Whether a file of the plugin's folder is a deck, read from its frontmatter alone.
+export function isDeckSource(source: string): boolean {
+  try {
+    return splitFrontmatter(source).data['type'] === DECK_TYPE;
+  } catch {
+    return false;
+  }
+}
+
+export function parseDeck(source: string, path: string, course: string | null): Deck {
+  const { data, body } = splitFrontmatter(source);
+  const id = text(data['id']).trim();
+  if (!id) throw new Error('it has no id');
+  const closed = data['status'] === 'closed';
+  const cards = parseCards(body);
+  const size = Number(data['per_session']);
+  return {
+    id,
+    title: text(data['title']).trim() || 'Untitled deck',
+    draws_from: strings(data['draws_from']),
+    made_from: text(data['made_from']).trim() || null,
+    created_by: text(data['created_by']).trim() || null,
+    proctors: strings(data['proctors']),
+    status: deckStatusOf({ closed, cards }),
+    closed,
+    rank: typeof data['rank'] === 'number' ? data['rank'] : Number.MAX_SAFE_INTEGER,
+    course,
+    per_session: Number.isInteger(size) && size > 0 ? size : CARDS_A_SESSION,
+    cards,
+    path,
+  };
+}
+
+export function renderDeck(deck: Deck): string {
+  return joinFrontmatter(
+    {
+      id: deck.id,
+      type: DECK_TYPE,
+      title: deck.title,
+      draws_from: deck.draws_from,
+      made_from: deck.made_from,
+      created_by: deck.created_by,
+      proctors: deck.proctors,
+      status: deck.closed ? 'closed' : null,
+      rank: deck.rank === Number.MAX_SAFE_INTEGER ? null : deck.rank,
+      per_session: deck.per_session === CARDS_A_SESSION ? null : deck.per_session,
+    },
+    renderCards(deck.cards),
+  );
+}
+
+// A quiz's questions as cards: the prompt on the front, the answer and why it is right on the back.
+export function cardsFromQuiz(quiz: Pick<Quiz, 'questions'>, newId: () => string): Card[] {
+  return askable(quiz).map((question) => {
+    const answer = question.options[question.answer!]!.trim();
+    const why = question.why.trim();
+    return { id: newId(), front: question.prompt.trim(), back: why ? `${answer}. ${why}` : answer, reference: question.reference.trim() };
+  });
+}
+
+// ---- studying a deck ------------------------------------------------------------------------
+
+// What Study takes: the next cards (still learning first, then not yet seen, then the
+// learned ones studied longest ago), the ones missed last time, or the whole deck.
+export type StudyMode = 'next' | 'missed' | 'whole';
+export const STUDY_MODES: readonly StudyMode[] = ['next', 'missed', 'whole'];
+
+export interface ReviewAnswer {
+  // a copy of the card as it was studied, so editing or deleting it never changes the past
+  card: Card;
+  got: boolean;
+  at: string;
+}
+
+// One sitting with one deck: every answer in the order it was given, a card missed and
+// shown again later in the sitting answered twice.
+export interface Review {
+  id: string;
+  deck: string;
+  deck_title: string;
+  by: string;
+  mode: StudyMode;
+  started_at: string;
+  completed_at: string;
+  answers: ReviewAnswer[];
+}
+
+export function makeReview(input: { id: string; deck: Deck; by: string; mode: StudyMode; startedAt: string; completedAt: string; answers: Array<{ card: string; got: boolean; at?: string }> }): Review {
+  const byId = new Map(input.deck.cards.map((card) => [card.id, card]));
+  const answers: ReviewAnswer[] = input.answers.map((answer) => {
+    const card = byId.get(answer.card);
+    if (!card) throw new Error(`the deck has no card ${answer.card}; it may have changed while you were studying`);
+    if (typeof answer.got !== 'boolean') throw new Error(`card ${answer.card} needs Got it or Still learning`);
+    return { card: { ...card }, got: answer.got, at: answer.at ?? input.completedAt };
+  });
+  if (answers.length === 0) throw new Error('a study session answers at least one card');
+  if (!STUDY_MODES.includes(input.mode)) throw new Error('a study session takes the next cards, the missed ones, or the whole deck');
+  return { id: input.id, deck: input.deck.id, deck_title: input.deck.title, by: input.by, mode: input.mode, started_at: input.startedAt, completed_at: input.completedAt, answers };
+}
+
+export function parseReview(source: string): Review {
+  const data = parseYaml(source) as Review;
+  if (!data || typeof data !== 'object' || !data.id || !data.deck || !Array.isArray(data.answers)) throw new Error('it is not a study session');
+  return data;
+}
+
+export function renderReview(review: Review): string {
+  return stringifyYaml(review, { lineWidth: 0 });
+}
+
+export type CardState = 'new' | 'learning' | 'learned';
+
+export interface CardStanding {
+  id: string;
+  state: CardState;
+  // when the person last studied it, and how they answered: a record, never a reminder
+  last_seen: string | null;
+  last_got: boolean | null;
+}
+
+const reviewOrder = (a: Review, b: Review): number => a.completed_at.localeCompare(b.completed_at) || a.id.localeCompare(b.id);
+
+// Learned is two Got it in a row, the latest answers deciding; one missed puts it back to learning.
+function stateOf(answers: boolean[]): CardState {
+  if (answers.length === 0) return 'new';
+  return answers.length >= 2 && answers.at(-1) === true && answers.at(-2) === true ? 'learned' : 'learning';
+}
+
+export function standings(deck: Pick<Deck, 'cards'>, reviews: Review[]): Map<string, CardStanding> {
+  const answered = new Map<string, { answers: boolean[]; at: string }>();
+  for (const review of [...reviews].sort(reviewOrder)) {
+    for (const answer of review.answers) {
+      const held = answered.get(answer.card.id) ?? { answers: [], at: answer.at };
+      held.answers.push(answer.got);
+      held.at = answer.at;
+      answered.set(answer.card.id, held);
+    }
+  }
+  return new Map(
+    studiable(deck).map((card) => {
+      const held = answered.get(card.id);
+      return [card.id, { id: card.id, state: stateOf(held?.answers ?? []), last_seen: held?.at ?? null, last_got: held ? held.answers.at(-1)! : null }];
+    }),
+  );
+}
+
+export interface DeckProgress {
+  new: number;
+  learning: number;
+  learned: number;
+  of: number;
+  last_studied: string | null;
+  // newest first, without the cards
+  history: Array<{ id: string; mode: StudyMode; cards: number; still_learning: number; learned_after: number; completed_at: string; shared: boolean }>;
+}
+
+// A person's way through a deck. `shared` says which sessions were committed with the project.
+export function deckProgress(deck: Pick<Deck, 'cards'>, reviews: Array<Review & { shared?: boolean }>): DeckProgress {
+  const held = standings(deck, reviews);
+  const count = (state: CardState): number => [...held.values()].filter((standing) => standing.state === state).length;
+  const sorted = [...reviews].sort(reviewOrder);
+  const history = sorted.map((review, index) => {
+    const finals = new Map<string, boolean>();
+    for (const answer of review.answers) finals.set(answer.card.id, answer.got);
+    const after = standings(deck, sorted.slice(0, index + 1));
+    return {
+      id: review.id,
+      mode: review.mode,
+      cards: finals.size,
+      still_learning: [...finals.values()].filter((got) => !got).length,
+      learned_after: [...after.values()].filter((standing) => standing.state === 'learned').length,
+      completed_at: review.completed_at,
+      shared: review.shared !== false,
+    };
+  });
+  return { new: count('new'), learning: count('learning'), learned: count('learned'), of: held.size, last_studied: sorted.at(-1)?.completed_at ?? null, history: history.reverse() };
+}
+
+// The cards a sitting takes, in the order they come. `next` brings the cards still being
+// learned first, the longest unseen of them first, then the ones never seen in the deck's
+// order, then the learned ones studied longest ago; `missed`, the cards whose last answer
+// in the latest sitting was Still learning; `whole`, every card in order.
+export function cardsToStudy(deck: Pick<Deck, 'cards' | 'per_session'>, reviews: Review[], mode: StudyMode, size: number = deck.per_session): string[] {
+  const cards = studiable(deck);
+  if (mode === 'whole') return cards.map((card) => card.id);
+  if (mode === 'missed') {
+    const latest = [...reviews].sort(reviewOrder).at(-1);
+    if (!latest) return [];
+    const finals = new Map<string, boolean>();
+    for (const answer of latest.answers) finals.set(answer.card.id, answer.got);
+    return cards.filter((card) => finals.get(card.id) === false).map((card) => card.id);
+  }
+  return orderForStudy(deck, reviews)
+    .slice(0, size)
+    .map((standing) => standing.id);
+}
+
+// Still learning (longest unseen first), then never seen (in order), then learned (studied longest ago first).
+function orderForStudy(deck: Pick<Deck, 'cards'>, reviews: Review[]): CardStanding[] {
+  const held = [...standings(deck, reviews).values()];
+  const oldest = (a: CardStanding, b: CardStanding): number => (a.last_seen ?? '').localeCompare(b.last_seen ?? '');
+  return [...held.filter((standing) => standing.state === 'learning').sort(oldest), ...held.filter((standing) => standing.state === 'new'), ...held.filter((standing) => standing.state === 'learned').sort(oldest)];
+}
+
+// A sitting across several decks, in the same order, the decks taking turns within each kind.
+export function cardsAcross(decks: Array<{ deck: Pick<Deck, 'id' | 'cards'>; reviews: Review[] }>, size: number): Array<{ deck: string; card: string }> {
+  const tiers: Array<Array<Array<{ deck: string; card: string; last_seen: string | null }>>> = [[], [], []];
+  const rank: Record<CardState, number> = { learning: 0, new: 1, learned: 2 };
+  for (const { deck, reviews } of decks) {
+    const lists: Array<Array<{ deck: string; card: string; last_seen: string | null }>> = [[], [], []];
+    for (const standing of orderForStudy(deck, reviews)) lists[rank[standing.state]]!.push({ deck: deck.id, card: standing.id, last_seen: standing.last_seen });
+    lists.forEach((list, tier) => list.length > 0 && tiers[tier]!.push(list));
+  }
+  const out: Array<{ deck: string; card: string }> = [];
+  for (const lists of tiers) {
+    for (let turn = 0; out.length < size && lists.some((list) => turn < list.length); turn += 1) {
+      for (const list of lists) if (turn < list.length && out.length < size) out.push({ deck: list[turn]!.deck, card: list[turn]!.card });
+    }
+  }
+  return out;
 }
 
 // ---- an attempt -----------------------------------------------------------------------
@@ -392,7 +721,7 @@ export interface Comparison {
   mine: number | null;
 }
 
-// Totals only: no name, score, or answer of anyone else leaves this function (Quizzes REQ20).
+// Totals only: no name, score, or answer of anyone else leaves this function (Academy REQ20).
 export function compare(official: Attempt[], me: string | null): Comparison {
   const latest = [...latestByPerson(official).entries()];
   const counts = BANDS.map(() => 0);
@@ -491,7 +820,7 @@ export function courseProgress(quizzes: Array<Pick<Quiz, 'id' | 'title' | 'statu
   };
 }
 
-// May this person see everyone's results (Quizzes REQ21), or change the quiz (REQ10, REQ22)?
+// May this person see everyone's results (Academy REQ21), or change the quiz (REQ10, REQ22)?
 export interface Person {
   alias: string | null;
   owner: boolean;
@@ -512,7 +841,7 @@ export function canSeeResults(quiz: Pick<Quiz, 'created_by' | 'proctors'>, perso
   return person.alias !== null && (person.alias === quiz.created_by || quiz.proctors.includes(person.alias));
 }
 
-// May this person see who enrolled in a course and each one's scores across it (Quizzes REQ43)?
+// May this person see who enrolled in a course and each one's scores across it (Academy REQ43)?
 // A quiz with no known creator opens that quiz to everyone, never the whole course, so only a
 // person the course's quizzes actually name counts here.
 export function canSeeCourse(course: Pick<Course, 'created_by'>, quizzes: Array<Pick<Quiz, 'created_by' | 'proctors'>>, person: Person | null): boolean {
