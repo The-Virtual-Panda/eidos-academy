@@ -51,7 +51,7 @@ A quiz and a deck are markdown files you can read and edit by hand. `eidos acade
 
 ## Develop
 
-The source is at [The-Virtual-Panda/eidos-quizzes](https://github.com/The-Virtual-Panda/eidos-quizzes). A checkout builds against an `eidosmd` checkout beside it (`../eidosmd/cli`).
+The source is at [The-Virtual-Panda/eidos-academy](https://github.com/The-Virtual-Panda/eidos-academy). A checkout builds against an `eidosmd` checkout beside it (`../eidosmd/cli`).
 
 ```bash
 pnpm install
