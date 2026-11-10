@@ -1,6 +1,6 @@
 {
   "name": "eidos-academy",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "private": true,
   "description": "Academy for Eidos MD: quizzes and flashcard decks on a project's content, ordered courses, and every person's progress over time.",
   "type": "module",

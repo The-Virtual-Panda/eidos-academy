@@ -2,7 +2,7 @@
 name: academy
 title: Academy
 description: "Build quizzes and flashcard decks on your project's content, group them into ordered courses, and follow how people are doing over time"
-version: 0.3.1
+version: 0.3.2
 min_host: 0.18.0
 folder:
   kind: academy
