@@ -529,6 +529,8 @@ test('move-quizzes brings what the Quizzes plugin left into Academy, keeping eve
   const quiz = await json<Quiz>('academy', 'quiz', 'show', 'Q-OLD1');
   assert.match(quiz.path, /^academy\//);
   assert.ok(existsSync(path.join(sandbox.root, '.eidos/plugins/academy/results/bo/a-old.yaml')));
+  assert.ok(!existsSync(old), 'the emptied folder goes, so the check reports no folder nobody declares');
+  assert.ok(!existsSync(path.join(sandbox.root, '.eidos/plugins/quizzes')), "Quizzes' emptied workspace goes too");
   const after = await json<{ quizzes_left: unknown }>('academy', 'list');
   assert.equal(after.quizzes_left, null);
 });

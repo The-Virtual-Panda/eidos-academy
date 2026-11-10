@@ -499,7 +499,7 @@ test('cards made from every type carry its answer on the back', () => {
     [
       'False. It was where God lived.',
       'A; C. A and C.',
-      'Sinai, Mount Sinai. Exodus 25.',
+      'Sinai. Exodus 25.',
       'Genesis, Exodus, Leviticus. The books of Moses.',
       'mishkan: Dwelling place; mikdash: Holy place. The two names.',
       'God lives among them, and his holiness is kept',

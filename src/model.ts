@@ -523,7 +523,8 @@ export function renderDeck(deck: Deck): string {
 // with why it is right (Academy REQ48).
 export function cardsFromQuiz(quiz: Pick<Quiz, 'questions'>, newId: () => string): Card[] {
   return askable(quiz).map((question) => {
-    const answer = answerText(question).replace(/[.\s]+$/, '');
+    // a card shows one way to say a short answer, the first, not every spelling accepted
+    const answer = (question.type === 'short' ? (question.accepted.find((held) => held.trim()) ?? '').trim() : answerText(question)).replace(/[.\s]+$/, '');
     const why = question.why.trim();
     return { id: newId(), front: question.prompt.trim(), back: why ? `${answer}. ${why}` : answer, reference: question.reference.trim() };
   });

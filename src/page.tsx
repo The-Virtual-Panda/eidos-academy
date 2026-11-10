@@ -2032,11 +2032,15 @@ function Review({ attempt, chose = 'You gave', references = [] }: { attempt: Att
         const { question } = answer;
         const waiting = answer.earned === null;
         const right = !waiting && answer.earned! >= question.points;
+        // a written answer can earn part of its points
+        const partly = !waiting && !right && answer.earned! > 0;
         const points = `${answer.earned ?? '…'} of ${question.points} ${question.points === 1 ? 'point' : 'points'}`;
         return (
           <div className="qz-review" key={question.id}>
-            <span className={waiting ? 'qz-muted' : right ? 'qz-yes' : 'qz-no'}>{waiting ? '…' : right ? '✓' : '✗'}</span> {question.prompt}{' '}
-            {waiting && <span className="qz-badge accent">Waiting for a grade</span>}
+            <span className={waiting || partly ? 'qz-muted' : right ? 'qz-yes' : 'qz-no'} aria-label={waiting ? 'Waiting for a grade' : right ? 'Right' : partly ? 'Part of its points' : 'Wrong'}>
+              {waiting ? '…' : right ? '✓' : partly ? '◐' : '✗'}
+            </span>{' '}
+            {question.prompt} {waiting && <span className="qz-badge accent">Waiting for a grade</span>}
             {(question.type === 'written' || !right) && (
               <div className="qz-small">
                 {chose}: {responseText(question, answer.response)}
@@ -2353,8 +2357,17 @@ function PersonAttempt({ quiz, attempt }: { quiz: string; attempt: string }): JS
   return (
     <div className="qz" style={{ padding: '10px 0 0' }}>
       <div className="qz-stats">
-        <Stat hero label="Score" value={asPercent(data.score / data.total)} sub={`${data.score} of ${data.total} correct`} />
-        <Stat label="Missed" value={data.total - data.score} sub={`Questions as asked on ${formatDate(data.completed_at)}`} />
+        <Stat
+          hero
+          label="Score"
+          value={(data.waiting ?? 0) > 0 ? `${data.score}` : asPercent(data.score / data.total)}
+          sub={(data.waiting ?? 0) > 0 ? `points so far, ${data.waiting} waiting for a grade` : `${data.score} of ${data.total} points`}
+        />
+        <Stat
+          label="Missed"
+          value={data.answers.filter((answer) => answer.earned !== null && answer.earned < answer.question.points).length}
+          sub={`Of ${data.answers.length} questions, as asked on ${formatDate(data.completed_at)}`}
+        />
       </div>
       <Review attempt={data} chose="Chose" />
     </div>

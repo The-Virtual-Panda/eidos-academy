@@ -685,6 +685,13 @@ export class Store {
       };
       moveInto(from, path.join(this.host.workspace, part));
     }
+    // the folders the move emptied go too, so the check does not report a folder nobody declares
+    const emptied = (rel: string): void => {
+      const folder = this.abs(rel);
+      if (existsSync(folder) && listDir(folder).every((name) => name.startsWith('.'))) rmSync(folder, { recursive: true });
+    };
+    if (left.folder && left.folder !== target) emptied(left.folder);
+    emptied(QUIZZES_WORKSPACE);
     return { quizzes, courses, results, folder: left.folder && left.folder !== target ? left.folder : null };
   }
 
