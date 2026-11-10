@@ -51,6 +51,7 @@ interface Row_ {
   created_by_name: string | null;
   status: 'open' | 'closed';
   best: number | null;
+  waiting: boolean;
   may_edit: boolean;
   may_manage: boolean;
 }
@@ -544,6 +545,9 @@ interface ListRow {
   you_label: string | null;
 }
 
+// What a quiz shows a person who has no settled score on it yet but has an answer waiting for a grade.
+const WAITING_LABEL = 'Waiting for a grade';
+
 function listRows(overview: Overview): ListRow[] {
   return [
     ...overview.quizzes.map((row) => ({
@@ -552,7 +556,7 @@ function listRows(overview: Overview): ListRow[] {
       size: row.questions,
       size_label: `${row.questions} ${row.questions === 1 ? 'question' : 'questions'}`,
       you: row.best ?? -1,
-      you_label: row.best === null ? null : `Best ${asPercent(row.best)}`,
+      you_label: row.best !== null ? `Best ${asPercent(row.best)}` : row.waiting ? WAITING_LABEL : null,
     })),
     ...overview.decks.map((row) => ({
       kind: 'deck' as const,
@@ -1505,7 +1509,7 @@ function ProgressDetail({ course, person }: { course: string; person: string | n
                       </>
                     )}
                   </td>
-                  <td className="num">{row.best === null ? <Text tone="faint">Not yet</Text> : asPercent(row.best)}</td>
+                  <td className="num">{row.best !== null ? asPercent(row.best) : <Text tone="faint">{row.waiting ? WAITING_LABEL : 'Not yet'}</Text>}</td>
                   <td className="num">{row.latest === null ? <Text tone="faint">-</Text> : asPercent(row.latest)}</td>
                   <td className="num">
                     {row.attempts === 0 ? (
@@ -1926,12 +1930,14 @@ function CoursePage({ id, tab, person }: { id: string; tab: string; person: stri
                     </span>
                     {placed.kind === 'quiz' ? (
                       <>
-                        <span className="qz-badge">{placed.row.best === null ? 'Not yet' : `Best ${asPercent(placed.row.best)}`}</span>
+                        <span className={`qz-badge${placed.row.best === null && placed.row.waiting ? ' accent' : ''}`}>
+                          {placed.row.best !== null ? `Best ${asPercent(placed.row.best)}` : placed.row.waiting ? WAITING_LABEL : 'Not yet'}
+                        </span>
                         {row.status === 'closed' ? (
                           <span className="qz-badge">Closed</span>
                         ) : (
-                          <Link className={`qz-btn${placed.row.best === null ? '' : ' secondary'}`} to={page}>
-                            {placed.row.best === null ? 'Take' : 'Retake'}
+                          <Link className={`qz-btn${placed.row.best === null && !placed.row.waiting ? '' : ' secondary'}`} to={page}>
+                            {placed.row.best === null && !placed.row.waiting ? 'Take' : 'Retake'}
                           </Link>
                         )}
                       </>
@@ -3125,11 +3131,11 @@ function GradeDialog({
           <div className="qz-answer">{answer.response}</div>
         </div>
         <div className="qz-two">
-          <div>
+          <div className="qz-lines">
             <span className="qz-label">Model answer</span>
             <Text size="sm">{question.model}</Text>
           </div>
-          <div>
+          <div className="qz-lines">
             <span className="qz-label">What a full answer covers</span>
             <Text size="sm">{question.covers || '-'}</Text>
           </div>
@@ -4321,7 +4327,7 @@ function DeckPage({ id, tab, generate }: { id: string; tab: string; generate: st
         <div className="qz">
           {data.course ? (
             <Link className="qz-eyebrow" to={pageHref(host, `course/${Q(data.course.id)}`)}>
-              Deck · {data.course.title} · {data.place} of {data.of}
+              {data.course.title} · Deck {data.place} of {data.of}
             </Link>
           ) : (
             <span className="qz-eyebrow">Deck</span>

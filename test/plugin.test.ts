@@ -489,6 +489,9 @@ test('a course holds quizzes and decks in one order, and Keep studying lists eve
       ['quiz', quiz.id, 2],
     ],
   );
+  const quizPage = await sandbox.route<{ place: number; of: number }>('GET', 'quiz', { query: { id: quiz.id } });
+  const deckPage = await sandbox.route<{ place: number; of: number }>('GET', 'deck', { query: { id: deck.id } });
+  assert.deepEqual([quizPage.place, quizPage.of, deckPage.place, deckPage.of], [2, 2, 1, 2], 'a quiz and a deck count their place among both, as the course does');
   await card(deck.id, 'In a course');
   const keep = await sandbox.route<{ decks: Array<{ id: string; unseen: number }> }>('GET', 'keep-studying');
   assert.equal(keep.decks.find((row) => row.id === deck.id)?.unseen, 1);
@@ -570,6 +573,8 @@ test('every question type is written from the shell, and a written answer waits 
   });
   assert.equal(taken.waiting, 1);
   assert.equal(taken.attempt.score, 5);
+  const waitingRow = async () => (await sandbox.route<{ quizzes: Array<{ id: string; best: number | null; waiting: boolean }> }>('GET', 'overview')).quizzes.find((row) => row.id === quiz.id)!;
+  assert.deepEqual([(await waitingRow()).best, (await waitingRow()).waiting], [null, true], 'a quiz with an answer waiting says so, not that it is untaken');
   assert.equal(taken.attempt.total, 10);
 
   // bo neither created it nor proctors it, so does not grade it; the owner does
@@ -607,6 +612,7 @@ test('every question type is written from the shell, and a written answer waits 
   const done = await as<{ waiting: unknown[]; graded: Array<{ earned: number; grade: { by: string } }> }>('own', 'academy', 'grade', 'list', quiz.id);
   assert.equal(done.value!.waiting.length, 0);
   assert.equal(done.value!.graded[0]!.earned, 3);
+  assert.equal((await waitingRow()).waiting, false, 'once graded, nothing waits');
   assert.ok(existsSync(path.join(sandbox.root, '.eidos/plugins/academy/results/own/grades')), "a grade is kept in the grader's own folder");
   const mine = await sandbox.route<{ attempt: { score: number; waiting: number } }>('GET', 'attempt', { query: { id: quiz.id, attempt: taken.attempt.id } }).catch(() => null);
   if (mine) assert.equal((mine as unknown as { score: number }).score, 8);

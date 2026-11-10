@@ -1002,6 +1002,8 @@ export interface CourseQuizProgress {
   attempts: number;
   latest: number | null;
   best: number | null;
+  // an official attempt with an answer still waiting for a grade
+  waiting: boolean;
   last_taken: string | null;
   // newest first
   history: PersonResult['history'];
@@ -1015,17 +1017,20 @@ export interface CourseProgress {
   quizzes: CourseQuizProgress[];
 }
 
-export function courseProgress(quizzes: Array<Pick<Quiz, 'id' | 'title' | 'status'>>, official: Attempt[], alias: string): CourseProgress {
+// A quiz's place is its place in the course among quizzes and decks; without one, its place among the quizzes.
+export function courseProgress(quizzes: Array<Pick<Quiz, 'id' | 'title' | 'status'> & { place?: number }>, official: Attempt[], alias: string): CourseProgress {
   const rows = quizzes.map((quiz, index) => {
-    const result = everyone(official.filter((attempt) => attempt.quiz === quiz.id && attempt.by === alias))[0];
+    const theirs = official.filter((attempt) => attempt.quiz === quiz.id && attempt.by === alias);
+    const result = everyone(theirs)[0];
     return {
       id: quiz.id,
       title: quiz.title,
-      place: index + 1,
+      place: quiz.place ?? index + 1,
       status: quiz.status,
       attempts: result?.attempts ?? 0,
       latest: result?.latest ?? null,
       best: result?.best ?? null,
+      waiting: theirs.some((attempt) => !settled(attempt)),
       last_taken: result?.last_taken ?? null,
       history: result?.history ?? [],
     };

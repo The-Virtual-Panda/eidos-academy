@@ -59,6 +59,8 @@ export interface QuizRow {
   created_by_name: string | null;
   status: QuizStatus;
   best: number | null;
+  // the person has an official attempt with an answer still waiting for a grade
+  waiting: boolean;
   may_edit: boolean;
   may_manage: boolean;
 }
@@ -137,6 +139,7 @@ export function makeApi(host: Host) {
         created_by: quiz.created_by,
         created_by_name: nameOf(quiz.created_by),
         best: bestOf(quiz.id, me?.alias ?? null, official),
+        waiting: Boolean(me?.alias) && official.some((attempt) => attempt.quiz === quiz.id && attempt.by === me!.alias && !settled(attempt)),
         may_edit: canEdit(quiz, store.access()),
         may_manage: canManage(quiz, store.access()),
       };
@@ -192,7 +195,13 @@ export function makeApi(host: Host) {
   const mayWatch = (course: Course): boolean => canSeeCourse(course, quizzesOf(course), store.access());
 
   const progressFor = (course: Course, alias: string) => {
-    const progress = courseProgress(quizzesOf(course), store.officialAttempts(), alias);
+    // each quiz keeps its place among the course's quizzes and decks, as the course numbers it
+    const quizzes = store
+      .inCourse(course.id)
+      .map((placed, index) => ({ placed, place: index + 1 }))
+      .filter(({ placed }) => placed.kind === 'quiz')
+      .map(({ placed, place }) => ({ ...(placed.item as Quiz), place }));
+    const progress = courseProgress(quizzes, store.officialAttempts(), alias);
     const sessions = store.blueprintsOf(course.study_plan);
     const done = store.sessionsDone(alias);
     return { progress, sessions_done: sessions.filter((session) => done[session.id]).length, sessions: sessions.length };
@@ -242,7 +251,7 @@ export function makeApi(host: Host) {
       const alias = me?.alias ?? null;
       const mine = myAttempts(quiz.id, alias);
       const listed = store.list();
-      const inCourse = quiz.course ? listed.quizzes.filter((held) => held.course === quiz.course) : [];
+      const inCourse = quiz.course ? store.inCourse(quiz.course) : [];
       const course = listed.courses.find((held) => held.id === quiz.course) ?? null;
       return {
         quiz,
@@ -250,7 +259,7 @@ export function makeApi(host: Host) {
         proctor_names: Object.fromEntries(quiz.proctors.map((alias) => [alias, nameOf(alias)])),
         askable: askable(quiz).length,
         course: course ? { id: course.id, title: course.title } : null,
-        place: quiz.course ? inCourse.findIndex((held) => held.id === quiz.id) + 1 : null,
+        place: quiz.course ? inCourse.findIndex((placed) => placed.item.id === quiz.id) + 1 : null,
         of: inCourse.length,
         may: {
           edit: canEdit(quiz, store.access()),

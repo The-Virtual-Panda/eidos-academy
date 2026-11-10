@@ -224,7 +224,8 @@ button.qz-add { padding: 2px 8px; border: 1px dashed var(--color-line-strong); b
 .qz-select { width: auto; min-width: 220px; height: 40px; padding: 0 10px; }
 .qz-pending { margin: 24px 0; padding: 16px 20px; border: 1px solid var(--color-line); border-radius: var(--radius-2xl); background: var(--color-raised); }
 .qz-h3 { margin: 14px 0 4px; font-size: var(--text-base); font-weight: 700; }
-.qz-score-of { color: var(--color-muted); font-size: 40px; }
+.qz-score-of { margin-left: .1em; color: var(--color-muted); font-size: 40px; letter-spacing: -.02em; }
+.qz-lines { white-space: pre-line; }
 .qz-pts { display: inline-flex; overflow: hidden; border: 1px solid var(--color-line); border-radius: var(--radius-xl); }
 .qz-pts button { min-width: 44px; height: 44px; border: 0; border-right: 1px solid var(--color-line); background: var(--color-raised); color: var(--color-fg); font: inherit; font-weight: 700; cursor: pointer; }
 .qz-pts button:last-child { border-right: 0; }

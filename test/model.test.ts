@@ -201,6 +201,23 @@ test("a person's progress lists every quiz of the course in order, with only the
   assert.deepEqual([none.taken, none.average_best, none.last_taken], [0, null, null]);
 });
 
+test("a course's progress keeps each quiz's place among quizzes and decks, and says when an answer waits for a grade", () => {
+  const quizzes = [
+    { id: 'Q-1', title: 'One', status: 'open' as const, place: 1 },
+    { id: 'Q-2', title: 'Two', status: 'open' as const, place: 3 },
+  ];
+  const waiting: Attempt = { ...attempt('ada', 4, 10, '2026-01-02'), quiz: 'Q-2', id: 'Q-2-ada', waiting: 1 };
+  const progress = courseProgress(quizzes, [{ ...attempt('ada', 8, 10, '2026-01-01'), quiz: 'Q-1', id: 'Q-1-ada' }, waiting], 'ada');
+  assert.deepEqual(
+    progress.quizzes.map((row) => [row.place, row.id, row.best, row.waiting]),
+    [
+      [1, 'Q-1', 0.8, false],
+      [3, 'Q-2', null, true],
+    ],
+  );
+  assert.equal(progress.taken, 1, 'an attempt waiting for a grade does not count as taken yet');
+});
+
 test("a course's people go to its creator, its quizzes' creators and proctors, and owners", () => {
   const course = { created_by: 'ada' };
   const quizzes = [
