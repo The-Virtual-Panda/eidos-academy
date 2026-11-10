@@ -3303,9 +3303,9 @@ function QuizPage({ id, tab, generate }: { id: string; tab: string; generate: st
             </Link>
           )}
           <div className="qz-row" style={{ alignItems: 'flex-start' }}>
-            <h1 className="qz-h1" style={{ flex: '1 1 400px' }}>
-              {quiz.title}
-            </h1>
+            <div style={{ flex: '1 1 400px', minWidth: 0 }}>
+              <InlineText className="qz-h1" as="h1" label="The quiz's name" value={quiz.title} editable={may.edit} onSave={(title) => title.trim() !== '' && patch({ title })} />
+            </div>
             <span className="qz-head-actions">
               {may.edit && data.askable > 0 && (
                 <Button size="sm" onClick={() => setMakingDeck(true)}>
@@ -4314,9 +4314,9 @@ function DeckPage({ id, tab, generate }: { id: string; tab: string; generate: st
             <span className="qz-eyebrow">Deck</span>
           )}
           <div className="qz-row" style={{ alignItems: 'flex-start' }}>
-            <h1 className="qz-h1" style={{ flex: '1 1 400px' }}>
-              {deck.title}
-            </h1>
+            <div style={{ flex: '1 1 400px', minWidth: 0 }}>
+              <InlineText className="qz-h1" as="h1" label="The deck's name" value={deck.title} editable={may.edit} onSave={(title) => title.trim() !== '' && patch({ title })} />
+            </div>
             <span className="qz-head-actions">
               {may.study && data.studiable > 0 && (
                 <Link className="qz-btn" to={studyHref(host, { deck: deck.id })}>
