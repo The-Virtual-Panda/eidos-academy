@@ -91,7 +91,8 @@ export const CSS = `
 .qz-move button:disabled { opacity: .3; cursor: default; }
 .qz-quiz { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 10px; padding: 14px 16px; }
 .qz-builder { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; }
-.qz-qlist { flex: 1 1 250px; max-width: 320px; overflow: hidden; border: 1px solid var(--color-line); border-radius: var(--radius-xl); }
+/* a long list scrolls on its own, held beside the question open */
+.qz-qlist { position: sticky; top: 12px; flex: 1 1 250px; max-width: 320px; max-height: calc(100vh - 120px); overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--color-line); border-radius: var(--radius-xl); }
 .qz-qrow { display: flex; gap: 8px; width: 100%; padding: 8px 10px; border: 0; border-bottom: 1px solid var(--color-line); background: none; color: inherit; font: inherit; font-size: var(--text-sm); text-align: left; cursor: pointer; }
 .qz-qrow:last-child { border-bottom: 0; }
 .qz-qrow:hover { background: var(--color-hover); }
@@ -189,7 +190,51 @@ export const CSS = `
 .qz-attempt button { padding: 0; border: 0; background: none; color: var(--color-accent); font: inherit; cursor: pointer; }
 .qz-attempt button:hover { text-decoration: underline; }
 .qz-table button.qz-toggle { display: inline-flex; gap: 4px; padding: 0; border: 0; background: none; color: var(--color-accent); font: inherit; cursor: pointer; }
-@media (max-width: 760px) { .qz-h1 { font-size: 26px; } .qz-score { font-size: 68px; } .qz-prompt { font-size: var(--text-2xl); } .qz-qlist { max-width: none; } }
+.qz-faint { color: var(--color-faint); }
+.qz-block { display: block; }
+.qz-qrow span.qz-qtext:last-child { display: block; flex: 1; min-width: 0; -webkit-line-clamp: unset; }
+.qz-one { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+button.qz-add { padding: 2px 8px; border: 1px dashed var(--color-line-strong); background: none; font: inherit; font-size: var(--text-sm); }
+.qz-two { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.qz-check { display: inline-flex; gap: 6px; align-items: flex-start; font-size: var(--text-sm); cursor: pointer; }
+.qz-check input { flex: none; width: 15px; height: 15px; margin-top: 3px; accent-color: var(--color-accent); }
+.qz-key input[type=checkbox] { flex: none; width: 16px; height: 16px; accent-color: var(--color-ok); }
+.qz-picker { padding: 12px 14px; border: 1px solid var(--color-line); border-radius: var(--radius-xl); background: var(--color-raised); }
+.qz-take { max-width: 1040px; padding-top: 32px; }
+.qz-take .qz-prompt { margin: 40px 0 32px; }
+.qz-context { margin: -18px 0 28px; color: var(--color-muted); white-space: pre-wrap; }
+.qz-figure { margin: 0 0 28px; }
+.qz-figure img { display: block; max-width: 100%; max-height: 420px; border: 1px solid var(--color-line); border-radius: var(--radius-2xl); }
+.qz-tf { display: grid; max-width: 520px; grid-template-columns: 1fr 1fr; gap: 14px; }
+.qz-tf .qz-option { margin-bottom: 0; text-align: center; font-weight: 700; }
+.qz-opt { display: flex; gap: 12px; align-items: flex-start; }
+.qz-box { display: inline-flex; flex: none; align-items: center; justify-content: center; width: 18px; height: 18px; margin-top: 3px; border: 1.5px solid var(--color-line-strong); border-radius: 5px; font-size: 12px; font-weight: 800; line-height: 1; }
+.qz-box.on { border-color: var(--color-accent); background: var(--color-accent); color: var(--color-on-accent); }
+.qz-row-item { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; padding: 12px 16px; border: 1px solid var(--color-line); border-radius: var(--radius-3xl); background: var(--color-raised); }
+.qz-row-item.correct { border-color: var(--color-ok); background: color-mix(in srgb, var(--color-ok) 12%, transparent); }
+.qz-row-item.wrong { border-color: var(--color-error); background: color-mix(in srgb, var(--color-error) 12%, transparent); }
+.qz-n { display: inline-flex; flex: none; align-items: center; justify-content: center; width: 26px; height: 26px; border-radius: 50%; background: var(--color-hover); color: var(--color-muted); font-size: var(--text-sm); font-weight: 700; }
+.qz-grow { flex: 1; min-width: 0; }
+.qz-move { display: inline-flex; gap: 4px; }
+.qz-input, .qz-area, .qz-select { width: 100%; border: 1px solid var(--color-line); border-radius: var(--radius-2xl); background: var(--color-raised); color: var(--color-fg); font: inherit; }
+.qz-input { height: 52px; padding: 0 16px; font-size: var(--text-lg); }
+.qz-input.correct { border-color: var(--color-ok); background: color-mix(in srgb, var(--color-ok) 12%, transparent); }
+.qz-input.wrong { border-color: var(--color-error); background: color-mix(in srgb, var(--color-error) 12%, transparent); }
+.qz-area { display: block; min-height: 180px; padding: 14px 18px; line-height: 1.55; resize: vertical; }
+.qz-select { width: auto; min-width: 220px; height: 40px; padding: 0 10px; }
+.qz-pending { margin: 24px 0; padding: 16px 20px; border: 1px solid var(--color-line); border-radius: var(--radius-2xl); background: var(--color-raised); }
+.qz-h3 { margin: 14px 0 4px; font-size: var(--text-base); font-weight: 700; }
+.qz-score-of { color: var(--color-muted); font-size: 40px; }
+.qz-pts { display: inline-flex; overflow: hidden; border: 1px solid var(--color-line); border-radius: var(--radius-xl); }
+.qz-pts button { min-width: 44px; height: 44px; border: 0; border-right: 1px solid var(--color-line); background: var(--color-raised); color: var(--color-fg); font: inherit; font-weight: 700; cursor: pointer; }
+.qz-pts button:last-child { border-right: 0; }
+.qz-pts button.on { background: var(--color-accent); color: var(--color-on-accent); }
+.qz-suggest { margin-top: 12px; padding: 12px 16px; border: 1px solid color-mix(in srgb, var(--color-accent) 40%, transparent); border-radius: var(--radius-2xl); background: var(--color-accent-soft); }
+.qz-answer { padding: 12px 16px; border: 1px solid var(--color-line); border-radius: var(--radius-2xl); background: var(--color-raised); white-space: pre-wrap; }
+.qz-table button.qz-link { padding: 0; border: 0; background: none; color: var(--color-accent); font: inherit; font-weight: 500; cursor: pointer; }
+.qz-table .qz-one { max-width: 420px; }
+@media (max-width: 640px) { .qz-tf, .qz-two { grid-template-columns: 1fr; } .qz-select { width: 100%; min-width: 0; } .qz-row-item { flex-wrap: wrap; } .qz-take { padding-top: 12px; } }
+@media (max-width: 760px) { .qz-h1 { font-size: 26px; } .qz-score { font-size: 68px; } .qz-prompt { font-size: var(--text-2xl); } .qz-qlist { position: static; max-width: none; max-height: 320px; } }
 `;
 
 // The way back over the page. Eidos MD 0.18 has no useCrumbs and reads the way back from the address instead.

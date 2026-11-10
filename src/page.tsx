@@ -33,7 +33,8 @@ import {
   type PluginHost,
 } from 'eidosmd/page';
 import { asPercent, ContextMenu, Delta, Failed, formatDate, HelpMark, LaptopMark, Loading, Stat, Surface, useAct, useData, UserPill, useTrail, type MenuEntry } from './page-kit.tsx';
-import type { Attempt, AttemptKind, AttemptMode, Card, Comparison, Course, CourseProgress, Deck, DeckProgress, MyScores, PersonResult, Question, Quiz, StudyMode } from './model.ts';
+import type { Attempt, AttemptKind, AttemptMode, Card, Comparison, Course, CourseProgress, Deck, DeckProgress, GradeMark, MyScores, PersonResult, Quiz, StudyMode } from './model.ts';
+import { answerText, blankQuestion, isRight, QUESTION_TYPE_NAMES, QUESTION_TYPES, referenceLink, responseText, type Question, type QuestionType, type Response } from './question.ts';
 
 // ---- what the routes answer ------------------------------------------------------------
 
@@ -92,6 +93,8 @@ interface QuizView {
   scores: MyScores;
   practice: { missed: string[]; unseen: string[] };
   whole_quiz: string[];
+  references: Array<{ id: string; title: string; rel: string; sections: string[] }>;
+  to_grade: number | null;
   people: Array<{ alias: string; name: string }>;
 }
 interface Pickable {
@@ -133,6 +136,7 @@ interface Submitted {
   official_attempts: number;
   average: number | null;
   practice: { missed: string[]; unseen: string[] };
+  waiting: number;
 }
 interface ResultsView {
   summary: Comparison;
@@ -229,11 +233,43 @@ function Ask({ label, title, text }: { label: string; title: string; text: strin
   return <AskAgent label={label} title={title} text={text} />;
 }
 
+// Generating with questions or cards already there asks first, since the agent adds to them.
+function Generate({ label, title, text, existing, noun, what }: { label: string; title: string; text: string; existing: number; noun: string; what: string }): JSX.Element {
+  const [asking, setAsking] = useState(false);
+  if (existing === 0) return <Ask label={label} title={title} text={text} />;
+  return (
+    <>
+      <Button size="sm" variant="accent" onClick={() => setAsking(true)}>
+        {label}
+      </Button>
+      {asking && (
+        <Modal
+          title={`${label}?`}
+          onClose={() => setAsking(false)}
+          foot={
+            <Row justify="end" gap="sm">
+              <Button onClick={() => setAsking(false)}>Cancel</Button>
+              <Ask label={label} title={title} text={text} />
+            </Row>
+          }
+        >
+          <Stack gap="md" pad="md">
+            <Text>
+              This {what} already has {existing} {noun}
+              {existing === 1 ? '' : 's'}. Are you sure? Your agent adds new {noun}s beside them, and the ones there stay.
+            </Text>
+          </Stack>
+        </Modal>
+      )}
+    </>
+  );
+}
+
 // ---- the agent's openings -----------------------------------------------------------------
 
 function generateText(quiz: Quiz, count: number, alias: string | null): string {
   return [
-    `Generate ${count} multiple-choice questions for the quiz ${quiz.id}, "${quiz.title}".`,
+    `Generate ${count} questions for the quiz ${quiz.id}, "${quiz.title}". Use multiple choice unless I ask for other types.`,
     quiz.draws_from.length > 0 ? `It draws from: ${quiz.draws_from.join(', ')}. Read all of it, and base every question strictly on it.` : 'It draws from nothing yet, so ask me what it should cover.',
     `Run \`eidos instructions academy\` first and follow what it says about writing questions, then add each one with \`eidos academy question add ${quiz.id}\`.`,
     quiz.closed
@@ -250,6 +286,7 @@ function regenerateText(quiz: Quiz, question: Question): string {
     `Replace question ${question.id} of the quiz ${quiz.id}, "${quiz.title}", with a better one on the same content (${quiz.draws_from.join(', ') || 'ask me what it covers'}).`,
     `The question now asks: ${question.prompt}`,
     'First ask me what is wrong with it, unless I have said.',
+    `It is ${QUESTION_TYPE_NAMES[question.type].toLowerCase()}; keep that type unless I ask for another.`,
     `Run \`eidos instructions academy\` first, then write it with \`eidos academy question set ${quiz.id} ${question.id} --regenerated\`.`,
   ].join(' ');
 }
@@ -449,7 +486,12 @@ function Sidebar(): JSX.Element {
         {data &&
           alias !== null &&
           courses.some((course) => course.created_by === alias) &&
-          entry('Created by me', `${root}?show=mine`, [go('Open', `${root}?show=mine`), { ...newQuiz, rule: true }, newDeck, newCourse], [...quizzes, ...decks].filter((row) => isMine(row, data)).length)}
+          entry(
+            'Created by me',
+            `${root}?show=mine`,
+            [go('Open', `${root}?show=mine`), { ...newQuiz, rule: true }, newDeck, newCourse],
+            [...quizzes, ...decks].filter((row) => isMine(row, data)).length,
+          )}
         {enrolled.length > 0 && entry('My courses', pageHref(host, 'my-courses'), [go('Open', pageHref(host, 'my-courses'))], enrolled.length)}
         {data && (
           <>
@@ -546,12 +588,19 @@ function QuizzesLeft({ left, reload }: { left: NonNullable<Overview['quizzes_lef
   return (
     <div style={{ marginBottom: 14 }}>
       <Notice>
-        Quizzes, Academy's name before 0.3.0, left {left.quizzes} {left.quizzes === 1 ? 'quiz or course file' : 'quiz and course files'} and {left.results} result {left.results === 1 ? 'file' : 'files'} in this project.{' '}
+        Quizzes, Academy's name before 0.3.0, left {left.quizzes} {left.quizzes === 1 ? 'quiz or course file' : 'quiz and course files'} and {left.results} result{' '}
+        {left.results === 1 ? 'file' : 'files'} in this project.{' '}
         {left.may_move ? (
           <Button
             size="sm"
             onClick={async () => {
-              if (!(await host.dialog.confirm('Move every quiz, course, result, and enrollment from Quizzes into Academy? Ids stay the same, so every result still names its quiz.', { title: 'Move into Academy', ok: 'Move' }))) return;
+              if (
+                !(await host.dialog.confirm('Move every quiz, course, result, and enrollment from Quizzes into Academy? Ids stay the same, so every result still names its quiz.', {
+                  title: 'Move into Academy',
+                  ok: 'Move',
+                }))
+              )
+                return;
               await act('Could not move them', async () => {
                 const moved = await host.post<{ then: string[] }>('move-quizzes');
                 setThen(moved.then);
@@ -562,7 +611,7 @@ function QuizzesLeft({ left, reload }: { left: NonNullable<Overview['quizzes_lef
             Move them into Academy
           </Button>
         ) : (
-          "A project owner can move them into Academy."
+          'A project owner can move them into Academy.'
         )}
       </Notice>
     </div>
@@ -643,7 +692,9 @@ function QuizList({ show }: { show: string | null }): JSX.Element {
       {sort?.key === key && <span className="qz-dt-dir">{sort.turned ? '↓' : '↑'}</span>}
     </th>
   );
-  const creators = [...new Map([...(data?.quizzes ?? []), ...(data?.decks ?? [])].flatMap((row) => (row.created_by ? [[row.created_by, row.created_by_name ?? row.created_by] as const] : []))).entries()];
+  const creators = [
+    ...new Map([...(data?.quizzes ?? []), ...(data?.decks ?? [])].flatMap((row) => (row.created_by ? [[row.created_by, row.created_by_name ?? row.created_by] as const] : []))).entries(),
+  ];
   const open = (row: ListRow): void => host.navigate(pageHref(host, `${row.kind}/${Q(row.id)}`));
   const first = rows.length === 0 ? 0 : at * pageSize + 1;
   const last = Math.min(rows.length, (at + 1) * pageSize);
@@ -1688,7 +1739,8 @@ function CoursePage({ id, tab, person }: { id: string; tab: string; person: stri
   ];
   const active = tabs.find((held) => held.name === tab && held.show)?.name ?? '';
   const remove = async (): Promise<void> => {
-    if (!(await host.dialog.confirm(`Delete ${course.title}? Its ${quizzes.length} quizzes and ${decks.length} decks stay, as one-offs.`, { title: 'Delete course', ok: 'Delete', danger: true }))) return;
+    if (!(await host.dialog.confirm(`Delete ${course.title}? Its ${quizzes.length} quizzes and ${decks.length} decks stay, as one-offs.`, { title: 'Delete course', ok: 'Delete', danger: true })))
+      return;
     await act('Could not delete the course', async () => {
       await host.del(`course?id=${Q(id)}`);
       host.navigate(pageHref(host, ''));
@@ -1866,7 +1918,9 @@ function CoursePage({ id, tab, person }: { id: string; tab: string; person: stri
                         {row.title}
                       </Link>
                       <span className="qz-muted qz-small">
-                        {placed.kind === 'quiz' ? `${placed.row.questions} ${placed.row.questions === 1 ? 'question' : 'questions'}` : `${placed.row.cards} ${placed.row.cards === 1 ? 'card' : 'cards'}`}
+                        {placed.kind === 'quiz'
+                          ? `${placed.row.questions} ${placed.row.questions === 1 ? 'question' : 'questions'}`
+                          : `${placed.row.cards} ${placed.row.cards === 1 ? 'card' : 'cards'}`}
                         {row.draws_from.length > 0 ? `, draws from ${row.draws_from.join(' and ')}` : ''}
                       </span>
                     </span>
@@ -1916,7 +1970,14 @@ function CoursePage({ id, tab, person }: { id: string; tab: string; person: stri
       </Page>
       {adding === 'quiz' && <NewQuiz onClose={() => setAdding(null)} courses={overview?.courses ?? [{ id: course.id, title: course.title }]} draws={[]} course={course.id} />}
       {adding === 'deck' && (
-        <NewDeck onClose={() => setAdding(null)} courses={overview?.courses ?? [{ id: course.id, title: course.title }]} quizzes={overview?.quizzes ?? []} draws={[]} course={course.id} fromQuiz={null} />
+        <NewDeck
+          onClose={() => setAdding(null)}
+          courses={overview?.courses ?? [{ id: course.id, title: course.title }]}
+          quizzes={overview?.quizzes ?? []}
+          draws={[]}
+          course={course.id}
+          fromQuiz={null}
+        />
       )}
     </Surface>
   );
@@ -1964,21 +2025,36 @@ function Chart({ points }: { points: MyScores['over_time'] }): JSX.Element {
   );
 }
 
-function Review({ attempt, chose = 'You chose' }: { attempt: Attempt; chose?: string }): JSX.Element {
+function Review({ attempt, chose = 'You gave', references = [] }: { attempt: Attempt; chose?: string; references?: Referenced[] }): JSX.Element {
   return (
     <>
       {attempt.answers.map((answer) => {
-        const right = answer.chosen === answer.question.answer;
+        const { question } = answer;
+        const waiting = answer.earned === null;
+        const right = !waiting && answer.earned! >= question.points;
+        const points = `${answer.earned ?? '…'} of ${question.points} ${question.points === 1 ? 'point' : 'points'}`;
         return (
-          <div className="qz-review" key={answer.question.id}>
-            <span className={right ? 'qz-yes' : 'qz-no'}>{right ? '✓' : '✗'}</span> {answer.question.prompt}
-            {!right && (
+          <div className="qz-review" key={question.id}>
+            <span className={waiting ? 'qz-muted' : right ? 'qz-yes' : 'qz-no'}>{waiting ? '…' : right ? '✓' : '✗'}</span> {question.prompt}{' '}
+            {waiting && <span className="qz-badge accent">Waiting for a grade</span>}
+            {(question.type === 'written' || !right) && (
               <div className="qz-small">
-                {chose}: {answer.question.options[answer.chosen]}
+                {chose}: {responseText(question, answer.response)}
               </div>
             )}
-            <div className="qz-muted qz-small">Answer: {answer.question.options[answer.question.answer]}</div>
-            {answer.question.why && <div className="qz-muted qz-small">{answer.question.why}</div>}
+            <div className="qz-muted qz-small">
+              {question.type === 'written' ? 'Model answer' : 'Answer'}: {answerText(question)} · {points}
+            </div>
+            {answer.grade && (
+              <div className="qz-small">
+                Graded {answer.grade.points} of {question.points} by {answer.grade.by}
+                {answer.grade.ai ? ' with AI' : ''}
+                {answer.grade.note ? `: ${answer.grade.note}` : ''}
+              </div>
+            )}
+            {answer.self_marked !== undefined && <div className="qz-muted qz-small">{answer.self_marked ? 'You marked it right' : 'You marked it not quite'}</div>}
+            {question.why && <div className="qz-muted qz-small">{question.why}</div>}
+            <ReferenceLine reference={question.reference} references={references} />
           </div>
         );
       })}
@@ -1995,7 +2071,12 @@ function AttemptModal({ quiz, attempt, title, chose, onClose }: { quiz: string; 
         {data && (
           <>
             <div className="qz-stats">
-              <Stat hero label="Score" value={asPercent(data.score / data.total)} sub={`${data.score} of ${data.total} correct`} />
+              <Stat
+                hero
+                label="Score"
+                value={(data.waiting ?? 0) > 0 ? `${data.score}` : asPercent(data.score / data.total)}
+                sub={(data.waiting ?? 0) > 0 ? `points so far, ${data.waiting} waiting for a grade` : `${data.score} of ${data.total} points`}
+              />
               <Stat label="When" value={<span style={{ fontSize: 26 }}>{formatDate(data.completed_at)}</span>} sub={data.kind === 'official' ? 'Official attempt' : 'Practice, local'} />
             </div>
             <Review attempt={data} {...(chose ? { chose } : {})} />
@@ -2038,7 +2119,7 @@ function MyScoresTab({ view }: { view: QuizView }): JSX.Element {
               <span className="qz-badge accent">Shared</span>
             </div>
             <div className="qz-muted qz-small" style={{ marginTop: 4 }}>
-              The whole quiz. Your score is committed and kept in your history.
+              The whole quiz. Your score is shared with the project and kept in your history.
             </div>
             <div className="qz-actions">
               {view.may.take_official && quiz.status === 'open' ? (
@@ -2060,7 +2141,7 @@ function MyScoresTab({ view }: { view: QuizView }): JSX.Element {
               </span>
             </div>
             <div className="qz-muted qz-small" style={{ marginTop: 4 }}>
-              {quiz.status === 'closed' ? 'Try it out while it is closed. Stays on this machine.' : 'Stays on this machine. Never committed, never counted.'}
+              {quiz.status === 'closed' ? 'Try it out while it is closed. Stays on this machine.' : 'Stays on this machine. Never shared, never counted.'}
             </div>
             <div className="qz-actions">
               <Link className="qz-btn secondary" to={take('practice', 'whole')}>
@@ -2119,7 +2200,13 @@ function MyScoresTab({ view }: { view: QuizView }): JSX.Element {
                   )}
                 </td>
                 <td className="num">
-                  {attempt.score}/{attempt.total} ({asPercent(attempt.percent)})
+                  {attempt.waiting > 0 ? (
+                    <span className="qz-badge accent">{attempt.waiting} waiting for a grade</span>
+                  ) : (
+                    <>
+                      {attempt.score}/{attempt.total} ({asPercent(attempt.percent)})
+                    </>
+                  )}
                 </td>
                 <td className="num">
                   <button className="qz-rowlink qz-small" style={{ color: 'var(--color-accent)' }} onClick={() => setReviewing(attempt.id)}>
@@ -2274,6 +2361,378 @@ function PersonAttempt({ quiz, attempt }: { quiz: string; attempt: string }): JS
   );
 }
 
+// ---- the parts of a question the builder edits ---------------------------------------------------------------
+
+type Referenced = QuizView['references'][number];
+
+// A question changed to another type keeps what every type shares and starts its answer over.
+function retyped(question: Question, type: QuestionType): Question {
+  const fresh = blankQuestion(question.id, type);
+  return { ...fresh, prompt: question.prompt, context: question.context, image: question.image, points: question.points, why: question.why, reference: question.reference };
+}
+
+// An optional part of a question, behind a button of its own until it is wanted.
+function Extra({ label, shown, onOpen, hint, children }: { label: string; shown: boolean; onOpen: () => void; hint: string; children: ReactNode }): JSX.Element {
+  if (!shown)
+    return (
+      <div>
+        <button type="button" className="qz-add" onClick={onOpen}>
+          + Add {label.toLowerCase()} (optional)
+        </button>
+      </div>
+    );
+  return (
+    <div>
+      <span className="qz-label">{label} (optional)</span>
+      {children}
+      <Text tone="faint" size="sm" block>
+        {hint}
+      </Text>
+    </div>
+  );
+}
+
+// A list of lines a person adds to and takes from: options, accepted answers, items.
+function Lines({
+  label,
+  values,
+  min,
+  max,
+  noun,
+  onChange,
+  mark,
+  ordered = false,
+}: {
+  label: string;
+  values: string[];
+  min: number;
+  max: number;
+  noun: string;
+  onChange: (values: string[], removed?: number, moved?: [number, number]) => void;
+  mark?: (index: number) => ReactNode;
+  ordered?: boolean;
+}): JSX.Element {
+  const move = (from: number, to: number): void => {
+    const next = [...values];
+    const [taken] = next.splice(from, 1);
+    next.splice(to, 0, taken!);
+    onChange(next, undefined, [from, to]);
+  };
+  return (
+    <div>
+      <span className="qz-label">{label}</span>
+      {values.map((value, index) => (
+        <div className="qz-key" key={index}>
+          {mark ? mark(index) : ordered ? <span className="qz-muted qz-small">{index + 1}</span> : null}
+          <Input aria-label={`${noun} ${index + 1}`} value={value} onChange={(event: { target: HTMLInputElement }) => onChange(values.map((held, at) => (at === index ? event.target.value : held)))} />
+          {ordered && (
+            <>
+              <Button size="sm" variant="quiet" aria-label={`Move ${noun.toLowerCase()} ${index + 1} up`} disabled={index === 0} onClick={() => move(index, index - 1)}>
+                ▲
+              </Button>
+              <Button size="sm" variant="quiet" aria-label={`Move ${noun.toLowerCase()} ${index + 1} down`} disabled={index === values.length - 1} onClick={() => move(index, index + 1)}>
+                ▼
+              </Button>
+            </>
+          )}
+          <Button
+            size="sm"
+            variant="quiet"
+            aria-label={`Remove ${noun.toLowerCase()} ${index + 1}`}
+            disabled={values.length <= min}
+            onClick={() =>
+              onChange(
+                values.filter((_, at) => at !== index),
+                index,
+              )
+            }
+          >
+            ×
+          </Button>
+        </div>
+      ))}
+      <Button size="sm" disabled={values.length >= max} onClick={() => onChange([...values, ''])}>
+        Add {noun.toLowerCase()}
+      </Button>
+    </div>
+  );
+}
+
+// What a question's type asks for as its answer (Academy REQ59).
+function AnswerFields({ question, change }: { question: Question; change: (patch: Partial<Question>) => void }): JSX.Element {
+  const shiftAfter = (indexes: number[], removed?: number, moved?: [number, number]): number[] => {
+    if (moved) {
+      const order = question.options.map((_, index) => index);
+      const [taken] = order.splice(moved[0], 1);
+      order.splice(moved[1], 0, taken!);
+      return indexes.map((index) => order.indexOf(index));
+    }
+    if (removed === undefined) return indexes;
+    return indexes.filter((index) => index !== removed).map((index) => (index > removed ? index - 1 : index));
+  };
+  switch (question.type) {
+    case 'choice':
+    case 'truefalse': {
+      const single = (index: number): ReactNode => (
+        <input
+          type="radio"
+          name="qz-answer"
+          aria-label={`${question.options[index] || `Option ${index + 1}`} is the answer`}
+          checked={question.answer === index}
+          onChange={() => change({ answer: index, correct: [index] })}
+        />
+      );
+      if (question.type === 'truefalse')
+        return (
+          <div role="radiogroup" aria-label="The answer">
+            <span className="qz-label">Which is the answer</span>
+            {question.options.map((option, index) => (
+              <label className="qz-key" key={option}>
+                {single(index)}
+                <span>{option}</span>
+              </label>
+            ))}
+          </div>
+        );
+      return (
+        <div role="radiogroup" aria-label="The answer">
+          <Lines
+            label="Options: pick the one that is the answer"
+            noun="Option"
+            values={question.options}
+            min={2}
+            max={5}
+            mark={single}
+            onChange={(options, removed) => {
+              const correct = shiftAfter(question.correct, removed);
+              change({ options, correct, answer: correct[0] ?? null });
+            }}
+          />
+        </div>
+      );
+    }
+    case 'all':
+      return (
+        <Lines
+          label="Options: check every true one. All or nothing."
+          noun="Option"
+          values={question.options}
+          min={2}
+          max={8}
+          mark={(index) => (
+            <input
+              type="checkbox"
+              aria-label={`${question.options[index] || `Option ${index + 1}`} is true`}
+              checked={question.correct.includes(index)}
+              onChange={(event: { target: HTMLInputElement }) => {
+                const correct = event.target.checked ? [...question.correct, index].sort((a, b) => a - b) : question.correct.filter((held) => held !== index);
+                change({ correct, answer: correct[0] ?? null });
+              }}
+            />
+          )}
+          onChange={(options, removed) => {
+            const correct = shiftAfter(question.correct, removed);
+            change({ options, correct, answer: correct[0] ?? null });
+          }}
+        />
+      );
+    case 'short':
+      return <Lines label="Accepted answers: any one counts, ignoring capitals and spacing" noun="Answer" values={question.accepted} min={1} max={12} onChange={(accepted) => change({ accepted })} />;
+    case 'order':
+      return <Lines label="Items in the right order: shown shuffled" noun="Item" values={question.items} min={2} max={8} ordered onChange={(items) => change({ items })} />;
+    case 'match':
+      return (
+        <div>
+          <span className="qz-label">Pairs: the right-hand side is shown shuffled</span>
+          {question.pairs.map((pair, index) => (
+            <div className="qz-key" key={index}>
+              <Input
+                aria-label={`Pair ${index + 1}, left`}
+                value={pair.left}
+                onChange={(event: { target: HTMLInputElement }) => change({ pairs: question.pairs.map((held, at) => (at === index ? { ...held, left: event.target.value } : held)) })}
+              />
+              <Input
+                aria-label={`Pair ${index + 1}, right`}
+                value={pair.right}
+                onChange={(event: { target: HTMLInputElement }) => change({ pairs: question.pairs.map((held, at) => (at === index ? { ...held, right: event.target.value } : held)) })}
+              />
+              <Button
+                size="sm"
+                variant="quiet"
+                aria-label={`Remove pair ${index + 1}`}
+                disabled={question.pairs.length <= 2}
+                onClick={() => change({ pairs: question.pairs.filter((_, at) => at !== index) })}
+              >
+                ×
+              </Button>
+            </div>
+          ))}
+          <Button size="sm" disabled={question.pairs.length >= 8} onClick={() => change({ pairs: [...question.pairs, { left: '', right: '' }] })}>
+            Add pair
+          </Button>
+        </div>
+      );
+    case 'written':
+      return (
+        <>
+          <label>
+            <span className="qz-label">Model answer: shown to the person once they submit</span>
+            <Textarea rows={3} value={question.model} onChange={(event: { target: HTMLTextAreaElement }) => change({ model: event.target.value })} />
+          </label>
+          <label>
+            <span className="qz-label">What a full answer covers: the grader grades against this</span>
+            <Textarea rows={3} value={question.covers} onChange={(event: { target: HTMLTextAreaElement }) => change({ covers: event.target.value })} />
+          </label>
+        </>
+      );
+  }
+}
+
+// What a reference reads as: the blueprint's title and its section, an asset, a link, or text.
+function referenceLabel(reference: string, references: Referenced[]): string {
+  const link = referenceLink(reference);
+  if (!link) return '';
+  if (link.kind === 'blueprint') {
+    const found = references.find((held) => held.id === link.id);
+    const name = found ? `${link.id} ${found.title}` : link.id;
+    return link.section ? `${name} › ${link.section}` : name;
+  }
+  if (link.kind === 'asset') return `Asset: ${link.path}`;
+  if (link.kind === 'link') return link.url;
+  return link.text;
+}
+
+// The reference, as a link once someone has answered (Academy REQ61).
+function ReferenceLine({ reference, references }: { reference: string; references: Referenced[] }): JSX.Element | null {
+  const host = usePluginHost();
+  const link = referenceLink(reference);
+  if (!link) return null;
+  const label = referenceLabel(reference, references);
+  if (link.kind === 'blueprint') {
+    const found = references.find((held) => held.id === link.id);
+    if (found)
+      return (
+        <div className="qz-small">
+          <a className="qz-link" href={host.hrefs.blueprint(found.rel)}>
+            {label}
+          </a>
+        </div>
+      );
+  }
+  if (link.kind === 'link')
+    return (
+      <div className="qz-small">
+        <a className="qz-link" href={link.url} target="_blank" rel="noreferrer">
+          {label}
+        </a>
+      </div>
+    );
+  return <div className="qz-muted qz-small">{label}</div>;
+}
+
+// A reference links to one thing: a section of what the quiz draws from first, any blueprint,
+// an asset, or a web link (Academy REQ61).
+function ReferencePicker({ value, references, drawsFrom, onChange }: { value: string; references: Referenced[]; drawsFrom: string[]; onChange: (reference: string) => void }): JSX.Element {
+  const [picking, setPicking] = useState(false);
+  const [search, setSearch] = useState('');
+  const [web, setWeb] = useState(false);
+  const { data: pickable } = useData<Pickable>(picking ? 'pickable' : null);
+  const choices = useMemo(() => {
+    const ours = references.filter((held) => drawsFrom.includes(held.id));
+    const out: Array<{ value: string; label: string }> = [];
+    for (const held of ours) {
+      out.push({ value: held.id, label: `${held.id} ${held.title}` });
+      for (const section of held.sections) out.push({ value: `${held.id}#${section}`, label: `${held.id} ${held.title} › ${section}` });
+    }
+    for (const source of drawsFrom) if (source.startsWith('assets/')) out.push({ value: source, label: `Asset: ${source}` });
+    for (const blueprint of pickable?.blueprints ?? []) if (!out.some((held) => held.value === blueprint.id)) out.push({ value: blueprint.id, label: `${blueprint.id} ${blueprint.title}` });
+    const words = search.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    return out.filter((choice) => words.every((word) => choice.label.toLowerCase().includes(word))).slice(0, 12);
+  }, [references, drawsFrom, pickable, search]);
+  const done = (reference: string): void => {
+    onChange(reference);
+    setPicking(false);
+    setWeb(false);
+    setSearch('');
+  };
+  if (picking)
+    return (
+      <div className="qz-picker">
+        <span className="qz-label">Reference (optional)</span>
+        {web ? (
+          <Input aria-label="Web link" placeholder="https://" value={search} onChange={(event: { target: HTMLInputElement }) => setSearch(event.target.value)} />
+        ) : (
+          <Input
+            aria-label="Search for a reference"
+            placeholder="Search blueprints, sections, and assets"
+            value={search}
+            onChange={(event: { target: HTMLInputElement }) => setSearch(event.target.value)}
+          />
+        )}
+        {!web && (
+          <div style={{ marginTop: 8 }}>
+            {choices.length === 0 && (
+              <Text tone="faint" size="sm" block>
+                Nothing matches.
+              </Text>
+            )}
+            {choices.map((choice) => (
+              <button type="button" key={choice.value} className="qz-qrow" onClick={() => done(choice.value)}>
+                <span className="qz-one">{choice.label}</span>
+              </button>
+            ))}
+          </div>
+        )}
+        <Row gap="sm" wrap>
+          {web ? (
+            <Button size="sm" variant="primary" disabled={!/^https?:\/\/\S+$/i.test(search.trim())} onClick={() => done(search.trim())}>
+              Link it
+            </Button>
+          ) : (
+            <button
+              type="button"
+              className="qz-add"
+              onClick={() => {
+                setWeb(true);
+                setSearch('');
+              }}
+            >
+              Paste a web link
+            </button>
+          )}
+          <Button size="sm" variant="quiet" onClick={() => setPicking(false)}>
+            Cancel
+          </Button>
+        </Row>
+      </div>
+    );
+  if (!value.trim())
+    return (
+      <div>
+        <button type="button" className="qz-add" onClick={() => setPicking(true)}>
+          + Link reference (optional)
+        </button>
+      </div>
+    );
+  return (
+    <div>
+      <span className="qz-label">Reference (optional)</span>
+      <Row gap="xs" wrap>
+        <span className="qz-pill">{referenceLabel(value, references)}</span>
+        <Button size="sm" variant="quiet" onClick={() => setPicking(true)}>
+          Change
+        </Button>
+        <Button size="sm" variant="quiet" onClick={() => onChange('')}>
+          Remove
+        </Button>
+      </Row>
+      <Text tone="faint" size="sm" block>
+        Linked under the reason once someone answers
+      </Text>
+    </div>
+  );
+}
+
 // ---- the builder -------------------------------------------------------------------------------------------
 
 function Builder({ view, generate, reload }: { view: QuizView; generate: string | null; reload: () => void }): JSX.Element {
@@ -2281,15 +2740,31 @@ function Builder({ view, generate, reload }: { view: QuizView; generate: string 
   const act = useAct();
   const { quiz } = view;
   const alias = host.user?.alias ?? null;
-  const [mode, setMode] = useState<'builder' | 'source'>('builder');
   const [picked, setPicked] = useState<string | null>(quiz.questions[0]?.id ?? null);
   const [draft, setDraft] = useState<Question | null>(null);
   const [count, setCount] = useState(generate ?? '20');
+  // a new question asks for its type first, with none chosen (Academy REQ7)
+  const [typeless, setTypeless] = useState(false);
+  const [contextOpen, setContextOpen] = useState(false);
+  const [imageOpen, setImageOpen] = useState(false);
   const held = quiz.questions.find((question) => question.id === picked) ?? null;
+  const pick = (id: string | null): void => {
+    setPicked(id);
+    setDraft(null);
+    setTypeless(false);
+    setContextOpen(false);
+    setImageOpen(false);
+  };
   const editing = draft ?? held;
 
   const dirty = draft !== null;
   const change = (patch: Partial<Question>): void => setDraft({ ...(editing as Question), ...patch });
+  const setting = (patch: Partial<Pick<Quiz, 'shuffle_questions' | 'shuffle_options'>>): void => {
+    void act('Could not change the quiz', async () => {
+      await host.put(`quiz?id=${Q(quiz.id)}`, patch);
+      reload();
+    });
+  };
   const save = async (): Promise<void> => {
     if (!draft) return;
     const ok = await act('Could not save the question', () => host.put(`question?id=${Q(quiz.id)}`, { question: draft }));
@@ -2302,8 +2777,9 @@ function Builder({ view, generate, reload }: { view: QuizView; generate: string 
   const add = async (): Promise<void> => {
     await act('Could not add a question', async () => {
       const blank = await host.post<Question>(`question/blank?id=${Q(quiz.id)}`);
-      setPicked(blank.id);
+      pick(blank.id);
       setDraft(blank);
+      setTypeless(true);
     });
   };
   const remove = async (): Promise<void> => {
@@ -2333,20 +2809,18 @@ function Builder({ view, generate, reload }: { view: QuizView; generate: string 
   const rows = draft && !held ? [...quiz.questions, draft] : quiz.questions;
   return (
     <>
-      <Row justify="between" wrap gap="sm">
-        <Seg>
-          <SegItem active={mode === 'builder'} selected={mode === 'builder'} onClick={() => setMode('builder')}>
-            Builder
-          </SegItem>
-          <SegItem active={mode === 'source'} selected={mode === 'source'} onClick={() => setMode('source')}>
-            Source
-          </SegItem>
-        </Seg>
+      <Row justify="end" wrap gap="sm">
         <Row gap="sm" wrap>
+          <label className="qz-check">
+            <input type="checkbox" checked={quiz.shuffle_questions} onChange={(event: { target: HTMLInputElement }) => setting({ shuffle_questions: event.target.checked })} /> Shuffle questions
+          </label>
+          <label className="qz-check">
+            <input type="checkbox" checked={quiz.shuffle_options} onChange={(event: { target: HTMLInputElement }) => setting({ shuffle_options: event.target.checked })} /> Shuffle options
+          </label>
           <span style={{ width: 70 }}>
             <Input aria-label="How many questions to generate" type="number" value={count} onChange={(event: { target: HTMLInputElement }) => setCount(event.target.value)} />
           </span>
-          <Ask label="Generate questions" title={`Questions: ${quiz.title}`} text={generateText(quiz, Number(count) || 20, alias)} />
+          <Generate label="Generate questions" title={`Questions: ${quiz.title}`} text={generateText(quiz, Number(count) || 20, alias)} existing={quiz.questions.length} noun="question" what="quiz" />
           <Button size="sm" onClick={add}>
             Add question
           </Button>
@@ -2357,23 +2831,20 @@ function Builder({ view, generate, reload }: { view: QuizView; generate: string 
           <Notice>Press Generate questions to have your agent write them in Chat. They appear here as it adds them, and your agent opens the quiz once the last one is in.</Notice>
         </div>
       )}
-      {mode === 'source' ? (
-        <SourceEditor id={quiz.id} reload={reload} />
-      ) : (
+      {
         <div className="qz-builder" style={{ marginTop: 14 }}>
           <div className="qz-qlist">
             {rows.map((question, index) => (
-              <button
-                key={question.id}
-                className="qz-qrow"
-                aria-current={question.id === picked ? 'true' : undefined}
-                onClick={() => {
-                  setPicked(question.id);
-                  setDraft(null);
-                }}
-              >
+              <button key={question.id} className="qz-qrow" aria-current={question.id === picked ? 'true' : undefined} onClick={() => pick(question.id)}>
                 <span className="qz-muted">{index + 1}</span>
-                <span>{question.prompt || 'New question'}</span>
+                <span className="qz-qtext">
+                  <span className="qz-one" title={question.prompt}>
+                    {question.prompt || 'New question'}
+                  </span>
+                  <span className="qz-faint qz-small">
+                    {typeless && draft?.id === question.id ? 'No type yet' : QUESTION_TYPE_NAMES[question.type]} · {question.points === 1 ? '1 point' : `${question.points} points`}
+                  </span>
+                </span>
               </button>
             ))}
             {rows.length === 0 && (
@@ -2386,75 +2857,107 @@ function Builder({ view, generate, reload }: { view: QuizView; generate: string 
           </div>
           {editing && (
             <div className="qz-qform">
-              <div>
-                <Row justify="between" wrap gap="sm">
-                  <label className="qz-label" htmlFor="qz-prompt" style={{ margin: 0 }}>
-                    Question
-                  </label>
-                  <Row gap="xs" wrap>
-                    {held && <Ask label="Regenerate question" title={`Regenerate: ${held.prompt.slice(0, 40)}`} text={regenerateText(quiz, held)} />}
-                    {held && (
-                      <>
-                        <Button size="sm" variant="quiet" disabled={quiz.questions[0]?.id === held.id} aria-label="Move question up" onClick={() => nudge(held.id, -1)}>
-                          ▲
+              <label>
+                <span className="qz-label">Question type</span>
+                <Select
+                  aria-label="Question type"
+                  required
+                  value={typeless ? '' : editing.type}
+                  onChange={(event: { target: HTMLSelectElement }) => {
+                    const type = event.target.value as QuestionType;
+                    if (!type) return;
+                    setTypeless(false);
+                    setDraft(retyped(editing, type));
+                  }}
+                >
+                  <option value="" disabled>
+                    Choose a question type
+                  </option>
+                  {QUESTION_TYPES.map((type) => (
+                    <option key={type} value={type}>
+                      {QUESTION_TYPE_NAMES[type]}
+                    </option>
+                  ))}
+                </Select>
+              </label>
+              {typeless ? (
+                <Notice>Choose a question type to write the question. Each type asks for its own answer: options, accepted answers, an order, pairs, or a model answer.</Notice>
+              ) : (
+                <>
+                  <div>
+                    <Row justify="between" wrap gap="sm">
+                      <label className="qz-label" htmlFor="qz-prompt" style={{ margin: 0 }}>
+                        Question
+                      </label>
+                      <Row gap="xs" wrap>
+                        {held && <Ask label="Regenerate question" title={`Regenerate: ${held.prompt.slice(0, 40)}`} text={regenerateText(quiz, held)} />}
+                        {held && (
+                          <>
+                            <Button size="sm" variant="quiet" disabled={quiz.questions[0]?.id === held.id} aria-label="Move question up" onClick={() => nudge(held.id, -1)}>
+                              ▲
+                            </Button>
+                            <Button size="sm" variant="quiet" disabled={quiz.questions.at(-1)?.id === held.id} aria-label="Move question down" onClick={() => nudge(held.id, 1)}>
+                              ▼
+                            </Button>
+                          </>
+                        )}
+                        <Button size="sm" variant="quiet" aria-label="Delete question" onClick={remove}>
+                          Delete
                         </Button>
-                        <Button size="sm" variant="quiet" disabled={quiz.questions.at(-1)?.id === held.id} aria-label="Move question down" onClick={() => nudge(held.id, 1)}>
-                          ▼
-                        </Button>
-                      </>
-                    )}
-                    <Button size="sm" variant="quiet" aria-label="Delete question" onClick={remove}>
-                      Delete
-                    </Button>
-                  </Row>
-                </Row>
-                <div style={{ marginTop: 4 }}>
-                  <Textarea id="qz-prompt" rows={2} value={editing.prompt} onChange={(event: { target: HTMLTextAreaElement }) => change({ prompt: event.target.value })} />
-                </div>
-              </div>
-              <div role="radiogroup" aria-label="The answer">
-                <span className="qz-label">Options: pick the one that is the answer</span>
-                {editing.options.map((option, index) => (
-                  <div className="qz-key" key={index}>
-                    <input type="radio" name="qz-answer" aria-label={`Option ${index + 1} is the answer`} checked={editing.answer === index} onChange={() => change({ answer: index })} />
-                    <Input
-                      aria-label={`Option ${index + 1}`}
-                      value={option}
-                      onChange={(event: { target: HTMLInputElement }) => change({ options: editing.options.map((held2, at) => (at === index ? event.target.value : held2)) })}
-                    />
-                    <Button
-                      size="sm"
-                      variant="quiet"
-                      aria-label={`Remove option ${index + 1}`}
-                      disabled={editing.options.length <= 2}
-                      onClick={() =>
-                        change({
-                          options: editing.options.filter((_, at) => at !== index),
-                          answer: editing.answer === null ? null : editing.answer === index ? null : editing.answer > index ? editing.answer - 1 : editing.answer,
-                        })
-                      }
-                    >
-                      ×
-                    </Button>
+                      </Row>
+                    </Row>
+                    <div style={{ marginTop: 4 }}>
+                      <Textarea id="qz-prompt" rows={2} value={editing.prompt} onChange={(event: { target: HTMLTextAreaElement }) => change({ prompt: event.target.value })} />
+                    </div>
                   </div>
-                ))}
-                <Button size="sm" disabled={editing.options.length >= 5} onClick={() => change({ options: [...editing.options, ''] })}>
-                  Add option
-                </Button>
-              </div>
-              <label>
-                <span className="qz-label">Why this is the answer</span>
-                <Textarea rows={3} value={editing.why} onChange={(event: { target: HTMLTextAreaElement }) => change({ why: event.target.value })} />
-              </label>
-              <label>
-                <span className="qz-label">Reference</span>
-                <Input value={editing.reference} onChange={(event: { target: HTMLInputElement }) => change({ reference: event.target.value })} />
-              </label>
+                  <Extra label="Context" shown={contextOpen || editing.context.trim() !== ''} onOpen={() => setContextOpen(true)} hint="Shown under the question while someone answers it">
+                    <Textarea
+                      aria-label="Context"
+                      rows={2}
+                      placeholder="A passage to read, a hint, or more about what you are asking"
+                      value={editing.context}
+                      onChange={(event: { target: HTMLTextAreaElement }) => change({ context: event.target.value })}
+                    />
+                  </Extra>
+                  <Extra label="Image" shown={imageOpen || editing.image.trim() !== ''} onOpen={() => setImageOpen(true)} hint="An image from the project's assets, shown with the question">
+                    <Input aria-label="Image" placeholder="assets/map.png" value={editing.image} onChange={(event: { target: HTMLInputElement }) => change({ image: event.target.value })} />
+                  </Extra>
+                  <AnswerFields question={editing} change={change} />
+                  <div className="qz-two">
+                    <label>
+                      <span className="qz-label">Points (optional)</span>
+                      <Input
+                        aria-label="Points"
+                        inputMode="numeric"
+                        placeholder="1"
+                        value={editing.points === 1 ? '' : String(editing.points)}
+                        onChange={(event: { target: HTMLInputElement }) => {
+                          const value = event.target.value.trim();
+                          change({ points: value === '' ? 1 : Math.max(0, Math.floor(Number(value)) || 0) });
+                        }}
+                      />
+                    </label>
+                    <div>
+                      <span className="qz-label">Graded</span>
+                      <Text tone="muted" size="sm">
+                        {editing.type === 'written' ? "By the quiz's creator, a proctor, or an owner, after it is taken" : 'Right away'}
+                      </Text>
+                    </div>
+                  </div>
+                  {editing.type !== 'written' && (
+                    <label>
+                      <span className="qz-label">Why this is the answer</span>
+                      <Textarea rows={3} value={editing.why} onChange={(event: { target: HTMLTextAreaElement }) => change({ why: event.target.value })} />
+                    </label>
+                  )}
+                  <ReferencePicker value={editing.reference} references={view.references} drawsFrom={quiz.draws_from} onChange={(reference) => change({ reference })} />
+                </>
+              )}
               <Row justify="end" gap="sm">
                 <Button disabled={!dirty} onClick={() => (held ? setDraft(null) : void remove())}>
                   Discard
                 </Button>
-                <Button variant="primary" disabled={!dirty} onClick={save}>
+                <Button variant="primary" disabled={!dirty || typeless} onClick={save}>
                   Save
                 </Button>
               </Row>
@@ -2464,47 +2967,287 @@ function Builder({ view, generate, reload }: { view: QuizView; generate: string 
             </div>
           )}
         </div>
-      )}
+      }
     </>
   );
 }
 
-function SourceEditor({ id, reload, route = 'source', what = 'quiz' }: { id: string; reload: () => void; route?: string; what?: string }): JSX.Element {
+// ---- grading written answers (Academy REQ65 to REQ67) -----------------------------------------------------
+
+interface WaitingAnswer_ {
+  attempt: string;
+  person: string;
+  name: string;
+  question: Question;
+  response: string;
+  completed_at: string;
+  earned: number | null;
+  grade: GradeMark | null;
+  suggestion: GradeMark | null;
+}
+interface ToGradeView {
+  waiting: WaitingAnswer_[];
+  graded: WaitingAnswer_[];
+}
+
+// What the grader's own agent is asked: every answer waiting, or the one open.
+function gradeText(quiz: Quiz, alias: string | null, accept: boolean, one: WaitingAnswer_ | null): string {
+  const record = `eidos academy grade add ${quiz.id} <attempt> <question> --points <n> --note "<note>" --ai${accept ? '' : ' --suggestion'}${alias ? ` --for ${alias}` : ''}`;
+  return [
+    one
+      ? `Suggest a grade for ${one.name}'s written answer to question ${one.question.id} of the quiz "${quiz.title}" (${quiz.id}), attempt ${one.attempt}.`
+      : `Grade the written answers waiting in the quiz "${quiz.title}" (${quiz.id}).`,
+    `Read them with \`eidos academy grade list ${quiz.id} --json\`${one ? `, and take only that one` : ''}.`,
+    "Grade each one against its question's model answer and what a full answer covers, out of the question's points, on what the person wrote alone. Write a short, kind note to the person saying what they got and what a full answer has that theirs does not.",
+    `Record each grade with \`${record}\`.`,
+    accept && !one ? 'These grades count as soon as you record them.' : 'These are suggestions: the grader accepts or changes each one before it counts.',
+  ].join('\n\n');
+}
+
+function gradeWords(answer: WaitingAnswer_): { label: string; cls: string } {
+  if (answer.grade) return { label: `Graded${answer.grade.ai ? ' by AI' : ''}`, cls: 'qz-badge good' };
+  if (answer.suggestion) return { label: 'AI suggests, review', cls: 'qz-badge accent' };
+  return { label: 'Waiting', cls: 'qz-badge' };
+}
+
+function AiGradeDialog({ quiz, count, onClose }: { quiz: Quiz; count: number; onClose: () => void }): JSX.Element {
+  const host = usePluginHost();
+  const [accept, setAccept] = useState(true);
+  return (
+    <Modal
+      title={`Grade ${count} ${count === 1 ? 'answer' : 'answers'} with AI`}
+      onClose={onClose}
+      foot={
+        <Row justify="end" gap="sm">
+          <Button onClick={onClose}>Cancel</Button>
+          <Ask label="Grade" title={`Grade: ${quiz.title}`} text={gradeText(quiz, host.user?.alias ?? null, accept, null)} />
+        </Row>
+      }
+    >
+      <Stack gap="md" pad="md">
+        <Text>Your agent grades each waiting answer against its question's model answer and what a full answer covers, and writes a note to the person.</Text>
+        <label className="qz-check">
+          <input type="checkbox" checked={accept} onChange={(event: { target: HTMLInputElement }) => setAccept(event.target.checked)} />
+          <span>
+            <strong>Accept AI grades without review</strong>
+            <span className="qz-muted qz-small qz-block">The grades are final right away. Off, they wait for you to accept or change each one.</span>
+          </span>
+        </label>
+        <Text tone="faint" size="sm">
+          You can change any grade later.
+        </Text>
+      </Stack>
+    </Modal>
+  );
+}
+
+function GradeDialog({
+  quiz,
+  answers,
+  start,
+  references,
+  onClose,
+  onSaved,
+}: {
+  quiz: Quiz;
+  answers: WaitingAnswer_[];
+  start: number;
+  references: Referenced[];
+  onClose: () => void;
+  onSaved: () => void;
+}): JSX.Element {
   const host = usePluginHost();
   const act = useAct();
-  const { data } = useData<{ text: string }>(`${route}?id=${Q(id)}`);
-  const [text, setText] = useState<string | null>(null);
-  const value = text ?? data?.text ?? '';
+  const [at, setAt] = useState(start);
+  const answer = answers[at];
+  const held = answer?.grade ?? null;
+  const [points, setPoints] = useState<number | null>(held?.points ?? null);
+  const [note, setNote] = useState(held?.note ?? '');
+  useEffect(() => {
+    setPoints(answer?.grade?.points ?? null);
+    setNote(answer?.grade?.note ?? '');
+  }, [answer]);
+  if (!answer) {
+    onClose();
+    return <></>;
+  }
+  const { question } = answer;
+  const next = (): void => (at + 1 < answers.length ? setAt(at + 1) : onClose());
+  const save = async (): Promise<void> => {
+    if (points === null) return;
+    const ok = await act('Could not save the grade', () => host.post('grade', { quiz: quiz.id, attempt: answer.attempt, question: question.id, points, note }));
+    if (ok) {
+      onSaved();
+      next();
+    }
+  };
   return (
-    <div style={{ marginTop: 14 }}>
-      <Textarea
-        aria-label={`The ${what}'s file`}
-        rows={24}
-        style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--text-sm)' }}
-        value={value}
-        onChange={(event: { target: HTMLTextAreaElement }) => setText(event.target.value)}
-      />
-      <div style={{ marginTop: 8 }}>
-        <Row justify="end" gap="sm">
-          <Button disabled={text === null} onClick={() => setText(null)}>
-            Discard
+    <Modal
+      title={answer.name}
+      size="lg"
+      onClose={onClose}
+      foot={
+        <Row justify="between" gap="sm" wrap>
+          <Text tone="muted" size="sm">
+            {at + 1} of {answers.length} · {formatDate(answer.completed_at)}
+          </Text>
+          <Row gap="sm">
+            <Button onClick={next}>Skip</Button>
+            <Button variant="primary" disabled={points === null} onClick={save}>
+              Save grade and next
+            </Button>
+          </Row>
+        </Row>
+      }
+    >
+      <Stack gap="md" pad="md">
+        <Text weight="strong">{question.prompt}</Text>
+        {question.context.trim() && (
+          <Text tone="muted" size="sm">
+            {question.context}
+          </Text>
+        )}
+        <div>
+          <span className="qz-label">Their answer</span>
+          <div className="qz-answer">{answer.response}</div>
+        </div>
+        <div className="qz-two">
+          <div>
+            <span className="qz-label">Model answer</span>
+            <Text size="sm">{question.model}</Text>
+          </div>
+          <div>
+            <span className="qz-label">What a full answer covers</span>
+            <Text size="sm">{question.covers || '-'}</Text>
+          </div>
+        </div>
+        <ReferenceLine reference={question.reference} references={references} />
+        <div>
+          <Row justify="between" wrap gap="sm">
+            <span className="qz-label" style={{ margin: 0 }}>
+              Points, out of {question.points}
+            </span>
+            {!answer.suggestion && <Ask label="Suggest a grade" title={`Suggest a grade: ${answer.name}`} text={gradeText(quiz, host.user?.alias ?? null, false, answer)} />}
+          </Row>
+          <div className="qz-pts" role="group" aria-label="Points">
+            {Array.from({ length: question.points + 1 }, (_, value) => (
+              <button key={value} type="button" className={points === value ? 'on' : ''} aria-pressed={points === value} onClick={() => setPoints(value)}>
+                {value}
+              </button>
+            ))}
+          </div>
+          {answer.suggestion && (
+            <div className="qz-suggest">
+              <strong>
+                {answer.suggestion.ai ? 'Your agent suggests' : 'Suggested'} {answer.suggestion.points} of {question.points}.
+              </strong>{' '}
+              {answer.suggestion.note}
+              <div className="qz-muted qz-small">A suggestion only. The grade is yours.</div>
+              <div style={{ marginTop: 8 }}>
+                <Button
+                  size="sm"
+                  onClick={() => {
+                    setPoints(answer.suggestion!.points);
+                    setNote(answer.suggestion!.note);
+                  }}
+                >
+                  Use {answer.suggestion.points} and its note
+                </Button>
+              </div>
+            </div>
+          )}
+        </div>
+        <label>
+          <span className="qz-label">Note to {answer.name} (optional)</span>
+          <Textarea rows={2} value={note} onChange={(event: { target: HTMLTextAreaElement }) => setNote(event.target.value)} />
+        </label>
+      </Stack>
+    </Modal>
+  );
+}
+
+function GradingTab({ view, reloadQuiz }: { view: QuizView; reloadQuiz: () => void }): JSX.Element {
+  const { data, error, reload } = useData<ToGradeView>(`to-grade?id=${Q(view.quiz.id)}`);
+  const [show, setShow] = useState<'waiting' | 'graded'>('waiting');
+  const [grading, setGrading] = useState<{ list: WaitingAnswer_[]; at: number } | null>(null);
+  const [ai, setAi] = useState(false);
+  if (error) return <Notice tone="error">{error}</Notice>;
+  if (!data) return <SkeletonBar />;
+  const rows = show === 'waiting' ? data.waiting : data.graded;
+  const saved = (): void => {
+    reload();
+    reloadQuiz();
+  };
+  return (
+    <>
+      <Row justify="between" wrap gap="sm">
+        <Seg>
+          <SegItem active={show === 'waiting'} selected={show === 'waiting'} onClick={() => setShow('waiting')}>
+            Waiting ({data.waiting.length})
+          </SegItem>
+          <SegItem active={show === 'graded'} selected={show === 'graded'} onClick={() => setShow('graded')}>
+            Graded ({data.graded.length})
+          </SegItem>
+        </Seg>
+        <Row gap="sm" wrap>
+          <Button size="sm" variant="accent" disabled={data.waiting.length === 0} onClick={() => setAi(true)}>
+            Grade with AI
           </Button>
-          <Button
-            variant="primary"
-            disabled={text === null}
-            onClick={async () => {
-              const ok = await act('Could not save the file', () => host.put(`${route}?id=${Q(id)}`, { text: value }));
-              if (ok) {
-                setText(null);
-                reload();
-              }
-            }}
-          >
-            Save
+          <Button size="sm" variant="primary" disabled={data.waiting.length === 0} onClick={() => setGrading({ list: data.waiting, at: 0 })}>
+            Start grading
           </Button>
         </Row>
+      </Row>
+      <div className="qz-scroll" style={{ marginTop: 12 }}>
+        {rows.length === 0 ? (
+          <Empty>{show === 'waiting' ? 'No written answer is waiting for a grade.' : 'Nothing graded yet.'}</Empty>
+        ) : (
+          <table className="qz-table">
+            <thead>
+              <tr>
+                <th>Person</th>
+                <th>Question</th>
+                <th>Submitted</th>
+                <th>Grade</th>
+                <th className="num">Points</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((answer, index) => {
+                const words = gradeWords(answer);
+                return (
+                  <tr key={`${answer.attempt}-${answer.question.id}`}>
+                    <td>
+                      <button type="button" className="qz-link" onClick={() => setGrading({ list: rows, at: index })}>
+                        {answer.name}
+                      </button>
+                    </td>
+                    <td>
+                      <span className="qz-one" title={answer.question.prompt}>
+                        {answer.question.prompt}
+                      </span>
+                    </td>
+                    <td>{formatDate(answer.completed_at)}</td>
+                    <td>
+                      <span className={words.cls}>{words.label}</span>
+                    </td>
+                    <td className="num">
+                      {answer.grade ? answer.grade.points : answer.suggestion ? answer.suggestion.points : '…'} of {answer.question.points}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
       </div>
-    </div>
+      <Text tone="faint" size="sm" block>
+        Oldest first. Grade with AI uses your own agent, with each question's model answer and what a full answer covers. Every grade, yours or the AI's, can be changed later. Only official attempts
+        wait here: in practice, a person marks their own written answers against the model answer.
+      </Text>
+      {ai && <AiGradeDialog quiz={view.quiz} count={data.waiting.length} onClose={() => setAi(false)} />}
+      {grading && <GradeDialog quiz={view.quiz} answers={grading.list} start={grading.at} references={view.references} onClose={() => setGrading(null)} onSaved={saved} />}
+    </>
   );
 }
 
@@ -2546,6 +3289,7 @@ function QuizPage({ id, tab, generate }: { id: string; tab: string; generate: st
     { name: '', label: 'My scores', show: true },
     { name: 'compare', label: 'How you compare', show: true },
     { name: 'results', label: 'Results', show: may.results },
+    { name: 'grade', label: 'To grade', show: may.results && (data.to_grade ?? 0) + quiz.questions.filter((question) => question.type === 'written').length > 0 },
     { name: 'questions', label: 'Questions', show: may.edit },
   ];
   const active = tabs.find((held) => held.name === tab && held.show)?.name ?? '';
@@ -2682,12 +3426,19 @@ function QuizPage({ id, tab, generate }: { id: string; tab: string; generate: st
               .map((held) => (
                 <Link key={held.name} className="qz-tab" to={pageHref(host, `quiz/${Q(id)}${held.name ? `/${held.name}` : ''}`)} aria-current={held.name === active ? 'page' : undefined}>
                   {held.label}
+                  {held.name === 'grade' && (data.to_grade ?? 0) > 0 && (
+                    <>
+                      {' '}
+                      <span className="qz-badge accent">{data.to_grade}</span>
+                    </>
+                  )}
                 </Link>
               ))}
           </nav>
           {active === '' && <MyScoresTab view={data} />}
           {active === 'compare' && <CompareTab id={quiz.id} />}
           {active === 'results' && <ResultsTab view={data} />}
+          {active === 'grade' && <GradingTab view={data} reloadQuiz={reload} />}
           {active === 'questions' && <Builder key={quiz.id} view={data} generate={generate} reload={reload} />}
         </div>
       </Page>
@@ -2709,6 +3460,279 @@ function shuffle<T>(items: T[]): T[] {
   return held;
 }
 
+// An image from the project's assets, served by the Assets plugin as it serves its own.
+const assetSrc = (relPath: string): string => `/api/plugins/assets/raw/${relPath.split('/').map(encodeURIComponent).join('/')}`;
+
+// One question as it is being answered: the order its options, items, or right sides show in,
+// what the person has given so far, and what they gave once it locked.
+interface Asked {
+  question: Question;
+  order: number[];
+  draft: Response | null;
+  given: Response | null;
+  // a written answer in practice, marked by the person (Academy REQ64)
+  self: boolean | null;
+}
+
+function startOf(question: Question, shuffled: boolean): Asked {
+  const indexes = (count: number): number[] => Array.from({ length: count }, (_, index) => index);
+  let order: number[] = [];
+  if (question.type === 'choice' || question.type === 'all') order = shuffled ? shuffle(indexes(question.options.length)) : indexes(question.options.length);
+  if (question.type === 'truefalse') order = [0, 1];
+  // put in order always starts out of order, or there is nothing to do
+  if (question.type === 'order') {
+    order = shuffle(indexes(question.items.length));
+    if (order.every((index, at) => index === at) && order.length > 1) order = [...order.slice(1), order[0]!];
+  }
+  if (question.type === 'match') order = shuffled ? shuffle(indexes(question.pairs.length)) : indexes(question.pairs.length);
+  const draft: Response | null =
+    question.type === 'all'
+      ? []
+      : question.type === 'order'
+        ? order.map((index) => question.items[index]!)
+        : question.type === 'match'
+          ? question.pairs.map(() => '')
+          : question.type === 'short' || question.type === 'written'
+            ? ''
+            : null;
+  return { question, order, draft, given: null, self: null };
+}
+
+// What a person does to answer a question of each type (Academy REQ12).
+function Answering({
+  asked,
+  kind,
+  onDraft,
+  onGive,
+  onSelf,
+}: {
+  asked: Asked;
+  kind: AttemptKind;
+  onDraft: (draft: Response) => void;
+  onGive: (given: Response) => void;
+  onSelf: (self: boolean) => void;
+}): JSX.Element {
+  const { question, order, draft, given } = asked;
+  const locked = given !== null;
+  const right = locked ? isRight(question, given) : null;
+  const optionState = (index: number): string => {
+    if (!locked) return '';
+    const correct = question.type === 'all' ? question.correct.includes(index) : index === question.answer;
+    const chose = Array.isArray(given) ? (given as number[]).includes(index) : given === index;
+    if (correct) return ' correct';
+    return chose ? ' wrong' : '';
+  };
+  switch (question.type) {
+    case 'choice':
+    case 'truefalse':
+      return (
+        <div className={question.type === 'truefalse' ? 'qz-tf' : undefined}>
+          {order.map((index) => (
+            <button key={index} className={`qz-option${optionState(index)}`} disabled={locked} onClick={() => onGive(index)}>
+              {question.options[index]}
+            </button>
+          ))}
+        </div>
+      );
+    case 'all': {
+      const picked = (draft as number[] | null) ?? [];
+      return (
+        <>
+          {order.map((index) => {
+            const on = (locked ? (given as number[]) : picked).includes(index);
+            return (
+              <button
+                key={index}
+                className={`qz-option qz-opt${optionState(index)}`}
+                disabled={locked}
+                aria-pressed={on}
+                onClick={() => onDraft(on ? picked.filter((held) => held !== index) : [...picked, index])}
+              >
+                <span className={`qz-box${on ? ' on' : ''}`} aria-hidden="true">
+                  {on ? '✓' : ''}
+                </span>
+                <span>{question.options[index]}</span>
+              </button>
+            );
+          })}
+          {!locked && (
+            <>
+              <p className="qz-muted qz-small">All or nothing: it counts when you check every true one and nothing else.</p>
+              <button className="qz-btn" disabled={picked.length === 0} onClick={() => onGive([...picked].sort((a, b) => a - b))}>
+                Check answer
+              </button>
+            </>
+          )}
+        </>
+      );
+    }
+    case 'short':
+      return (
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (!locked && String(draft ?? '').trim()) onGive(String(draft));
+          }}
+        >
+          <label className="qz-label" htmlFor="qz-short">
+            Your answer
+          </label>
+          <input
+            id="qz-short"
+            className={`qz-input${locked ? (right ? ' correct' : ' wrong') : ''}`}
+            value={String(locked ? given : (draft ?? ''))}
+            disabled={locked}
+            autoComplete="off"
+            onChange={(event) => onDraft(event.target.value)}
+          />
+          {!locked && (
+            <button type="submit" className="qz-btn" style={{ marginTop: 14 }} disabled={!String(draft ?? '').trim()}>
+              Check answer
+            </button>
+          )}
+        </form>
+      );
+    case 'order': {
+      const items = ((locked ? given : draft) as string[]) ?? [];
+      const move = (from: number, to: number): void => {
+        const next = [...items];
+        const [taken] = next.splice(from, 1);
+        next.splice(to, 0, taken!);
+        onDraft(next);
+      };
+      return (
+        <>
+          {items.map((item, index) => (
+            <div key={item} className={`qz-row-item${locked ? (item === question.items[index] ? ' correct' : ' wrong') : ''}`}>
+              <span className="qz-n">{index + 1}</span>
+              <span className="qz-grow">{item}</span>
+              {!locked && (
+                <span className="qz-move">
+                  <Button size="sm" variant="quiet" aria-label={`Move ${item} up`} disabled={index === 0} onClick={() => move(index, index - 1)}>
+                    ▲
+                  </Button>
+                  <Button size="sm" variant="quiet" aria-label={`Move ${item} down`} disabled={index === items.length - 1} onClick={() => move(index, index + 1)}>
+                    ▼
+                  </Button>
+                </span>
+              )}
+            </div>
+          ))}
+          {!locked && (
+            <>
+              <p className="qz-muted qz-small">Move each one with the arrows. It counts when every one is in place.</p>
+              <button className="qz-btn" onClick={() => onGive(items)}>
+                Check answer
+              </button>
+            </>
+          )}
+        </>
+      );
+    }
+    case 'match': {
+      const chosen = ((locked ? given : draft) as string[]) ?? [];
+      return (
+        <>
+          {question.pairs.map((pair, index) => {
+            const state = locked ? (chosen[index] === pair.right ? ' correct' : ' wrong') : '';
+            return (
+              <div key={index} className={`qz-row-item${state}`}>
+                <span className="qz-grow">
+                  <strong>{pair.left}</strong>
+                  {locked && chosen[index] !== pair.right && <span className="qz-small qz-block">Answer: {pair.right}</span>}
+                </span>
+                <select
+                  aria-label={`What ${pair.left} matches`}
+                  className="qz-select"
+                  value={chosen[index] ?? ''}
+                  disabled={locked}
+                  onChange={(event) => onDraft(chosen.map((held, at) => (at === index ? event.target.value : held)))}
+                >
+                  <option value="">Choose</option>
+                  {order.map((at) => (
+                    <option key={at} value={question.pairs[at]!.right}>
+                      {question.pairs[at]!.right}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            );
+          })}
+          {!locked && (
+            <>
+              <p className="qz-muted qz-small">It counts when every pair matches.</p>
+              <button className="qz-btn" disabled={chosen.some((right) => !right)} onClick={() => onGive(chosen)}>
+                Check answer
+              </button>
+            </>
+          )}
+        </>
+      );
+    }
+    case 'written':
+      return (
+        <>
+          <label className="qz-label" htmlFor="qz-written">
+            Your answer
+          </label>
+          <textarea id="qz-written" className="qz-area" value={String(locked ? given : (draft ?? ''))} disabled={locked} onChange={(event) => onDraft(event.target.value)} />
+          {!locked && (
+            <button className="qz-btn" style={{ marginTop: 14 }} disabled={!String(draft ?? '').trim()} onClick={() => onGive(String(draft))}>
+              Submit
+            </button>
+          )}
+          {locked && kind === 'practice' && asked.self === null && (
+            <div className="qz-actions" style={{ marginTop: 12 }}>
+              <span className="qz-small qz-muted">Against the model answer below, did you get it?</span>
+              <button className="qz-btn secondary" onClick={() => onSelf(true)}>
+                I got it
+              </button>
+              <button className="qz-btn secondary" onClick={() => onSelf(false)}>
+                Not quite
+              </button>
+            </div>
+          )}
+        </>
+      );
+  }
+}
+
+// What answering shows: right or not with the reason and the reference, or for a written
+// answer the model answer and what a full answer covers.
+function Feedback({ asked, kind, references }: { asked: Asked; kind: AttemptKind; references: Referenced[] }): JSX.Element {
+  const { question, given } = asked;
+  if (question.type === 'written')
+    return (
+      <div className="qz-pending">
+        {kind === 'official' ? (
+          <div className="qz-row" style={{ justifyContent: 'flex-start', gap: 8 }}>
+            <span className="qz-badge accent">Sent for grading</span>
+            <span className="qz-muted qz-small">A proctor grades this one. Your score is final once they do.</span>
+          </div>
+        ) : (
+          asked.self !== null && <span className={`qz-badge${asked.self ? ' good' : ''}`}>{asked.self ? 'You marked it right' : 'You marked it not quite'}</span>
+        )}
+        <h3 className="qz-h3">Model answer</h3>
+        <div>{question.model}</div>
+        {question.covers.trim() && (
+          <>
+            <h3 className="qz-h3">What a full answer covers</h3>
+            <div style={{ whiteSpace: 'pre-line' }}>{question.covers}</div>
+          </>
+        )}
+        <ReferenceLine reference={question.reference} references={references} />
+      </div>
+    );
+  const right = isRight(question, given!);
+  return (
+    <div className={`qz-feedback ${right ? 'correct' : 'wrong'}`}>
+      <strong>{right ? 'Correct.' : 'Not quite.'}</strong> {!right && question.type !== 'choice' && question.type !== 'truefalse' && <span>The answer: {answerText(question)}. </span>}
+      {question.why}
+      <ReferenceLine reference={question.reference} references={references} />
+    </div>
+  );
+}
+
 function Take({ id, kind, mode }: { id: string; kind: AttemptKind; mode: AttemptMode }): JSX.Element {
   const host = usePluginHost();
   const { data, error } = useData<QuizView>(`quiz?id=${Q(id)}`);
@@ -2718,7 +3742,7 @@ function Take({ id, kind, mode }: { id: string; kind: AttemptKind; mode: Attempt
       : null,
   );
   // what is asked is fixed when the attempt starts, so a file changing under it never moves a question
-  const [items, setItems] = useState<Array<{ question: Question; order: number[]; chosen: number | null }> | null>(null);
+  const [items, setItems] = useState<Asked[] | null>(null);
   const [position, setPosition] = useState(0);
   const [finished, setFinished] = useState<Submitted | null>(null);
   const [sending, setSending] = useState(false);
@@ -2729,7 +3753,9 @@ function Take({ id, kind, mode }: { id: string; kind: AttemptKind; mode: Attempt
     const wanted = mode === 'missed' ? data.practice.missed : mode === 'unseen' ? data.practice.unseen : data.whole_quiz;
     const byId = new Map(data.quiz.questions.map((question) => [question.id, question]));
     const asked = wanted.flatMap((question) => byId.get(question) ?? []);
-    setItems((mode === 'whole' ? asked : shuffle(asked)).map((question) => ({ question, order: shuffle(question.options.map((_, index) => index)), chosen: null })));
+    // the order follows the quiz's settings, and a retry shuffles whatever they say (Academy REQ62)
+    const inOrder = mode === 'whole' && !data.quiz.shuffle_questions ? asked : shuffle(asked);
+    setItems(inOrder.map((question) => startOf(question, data.quiz.shuffle_options)));
   }, [data, items, mode]);
 
   if (error) return <Failed message={error} />;
@@ -2772,26 +3798,50 @@ function Take({ id, kind, mode }: { id: string; kind: AttemptKind; mode: Attempt
 
   if (finished) {
     const { attempt } = finished;
+    const waiting = finished.waiting;
     return (
       <Surface>
         <Page>
           <div className="qz">
             <div className="qz-card qz-hero">
-              {finished.first && <span className="qz-badge accent">First attempt</span>}
-              {finished.new_best && <span className="qz-badge good">New personal best</span>}
-              <div className="qz-score">{asPercent(finished.percent)}</div>
-              <div>
-                {attempt.score} of {attempt.total} correct
-              </div>
-              <div className="qz-muted qz-small" style={{ marginTop: 6 }}>
-                <Delta change={finished.change} suffix="vs your last try" />
-              </div>
+              {waiting > 0 ? (
+                <span className="qz-badge accent">
+                  {waiting} {waiting === 1 ? 'answer' : 'answers'} waiting for a grade
+                </span>
+              ) : (
+                <>
+                  {finished.first && <span className="qz-badge accent">First attempt</span>}
+                  {finished.new_best && <span className="qz-badge good">New personal best</span>}
+                </>
+              )}
+              {waiting > 0 ? (
+                <>
+                  <div className="qz-score">
+                    {attempt.score}{' '}
+                    <span className="qz-score-of">of {attempt.total - attempt.answers.filter((answer) => answer.earned === null).reduce((sum, answer) => sum + answer.question.points, 0)}</span>
+                  </div>
+                  <div>Points so far, on the questions graded right away</div>
+                  <div className="qz-muted qz-small" style={{ marginTop: 6 }}>
+                    Your score is final once a proctor grades the rest. Until then it stays out of the quiz average.
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="qz-score">{asPercent(finished.percent)}</div>
+                  <div>
+                    {attempt.score} of {attempt.total} points
+                  </div>
+                  <div className="qz-muted qz-small" style={{ marginTop: 6 }}>
+                    <Delta change={finished.change} suffix="vs your last try" />
+                  </div>
+                </>
+              )}
             </div>
             <div className="qz-stats" style={{ marginTop: 18 }}>
               <Stat
                 label="Saved as"
                 value={<span style={{ fontSize: 26 }}>{attempt.kind === 'official' ? 'Official' : 'Practice'}</span>}
-                sub={attempt.kind === 'official' ? 'Goes out with the next commit' : 'On this machine only'}
+                sub={attempt.kind === 'official' ? 'Shared with the project' : 'On this machine only'}
               />
               <Stat
                 label="Quiz average"
@@ -2805,7 +3855,7 @@ function Take({ id, kind, mode }: { id: string; kind: AttemptKind; mode: Attempt
               <Stat label="Official attempts" value={finished.official_attempts} sub="Saved to your history" />
             </div>
             <h2 className="qz-h2">Review</h2>
-            <Review attempt={attempt} />
+            <Review attempt={attempt} references={data.references} />
             <div className="qz-actions" style={{ marginTop: 22 }}>
               <Link className="qz-btn" to={back}>
                 Back to quiz
@@ -2823,15 +3873,15 @@ function Take({ id, kind, mode }: { id: string; kind: AttemptKind; mode: Attempt
   }
 
   const item = items[position]!;
-  const { question, chosen, order } = item;
-  const answered = chosen !== null;
-  const right = chosen === question.answer;
+  const { question } = item;
+  const answered = item.given !== null && !(question.type === 'written' && kind === 'practice' && item.self === null);
   const last = position === items.length - 1;
+  const update = (patch: Partial<Asked>): void => setItems(items.map((held, at) => (at === position ? { ...held, ...patch } : held)));
   const see = async (): Promise<void> => {
     setSending(true);
     setFailure(null);
     try {
-      const answers = items.map((held) => ({ question: held.question.id, chosen: held.chosen as number }));
+      const answers = items.map((held) => ({ question: held.question.id, response: held.given, ...(held.self !== null ? { self_marked: held.self } : {}) }));
       setFinished(await host.post<Submitted>('attempt', { quiz: id, kind, mode, answers }));
     } catch (cause) {
       setFailure(cause instanceof Error ? cause.message : String(cause));
@@ -2842,9 +3892,9 @@ function Take({ id, kind, mode }: { id: string; kind: AttemptKind; mode: Attempt
   return (
     <Surface>
       <Page>
-        <div className="qz" style={{ maxWidth: 760 }}>
+        <div className="qz qz-take">
           <div className="qz-row">
-            <span className="qz-muted qz-small" style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+            <span className="qz-muted qz-small" style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
               {data.quiz.title}
               {kind === 'official' ? (
                 <span className="qz-badge accent">Official</span>
@@ -2853,6 +3903,8 @@ function Take({ id, kind, mode }: { id: string; kind: AttemptKind; mode: Attempt
                   <LaptopMark /> Practice
                 </span>
               )}
+              <span className="qz-badge">{QUESTION_TYPE_NAMES[question.type]}</span>
+              <span className="qz-badge">{question.points === 1 ? '1 point' : `${question.points} points`}</span>
             </span>
             <span className="qz-badge accent">
               {position + 1} / {items.length}
@@ -2862,31 +3914,27 @@ function Take({ id, kind, mode }: { id: string; kind: AttemptKind; mode: Attempt
             <div style={{ width: `${(position / items.length) * 100}%` }} />
           </div>
           <p className="qz-prompt">{question.prompt}</p>
-          {order.map((index) => {
-            const state = answered && index === question.answer ? ' correct' : answered && index === chosen ? ' wrong' : '';
-            return (
-              <button key={index} className={`qz-option${state}`} disabled={answered} onClick={() => setItems(items.map((held, at) => (at === position ? { ...held, chosen: index } : held)))}>
-                {question.options[index]}
-              </button>
-            );
-          })}
+          {question.context.trim() && <p className="qz-context">{question.context}</p>}
+          {question.image.trim() && (
+            <figure className="qz-figure">
+              <img src={assetSrc(question.image.trim())} alt="" />
+            </figure>
+          )}
+          <Answering key={question.id} asked={item} kind={kind} onDraft={(draft) => update({ draft })} onGive={(given) => update({ given })} onSelf={(self) => update({ self })} />
+          {item.given !== null && <Feedback asked={item} kind={kind} references={data.references} />}
           {answered && (
             <>
-              <div className={`qz-feedback ${right ? 'correct' : 'wrong'}`}>
-                <strong>{right ? 'Correct.' : 'Not quite.'}</strong> {question.why}
-                {question.reference && <div className="qz-muted qz-small">{question.reference}</div>}
-              </div>
               {failure && (
                 <div style={{ marginBottom: 12 }}>
                   <Notice tone="error">{failure}</Notice>
                 </div>
               )}
               {last ? (
-                <button className="qz-btn" disabled={sending} onClick={see} autoFocus>
+                <button className="qz-btn" disabled={sending} onClick={see}>
                   {sending ? '…' : 'See results'}
                 </button>
               ) : (
-                <button className="qz-btn" onClick={() => setPosition(position + 1)} autoFocus>
+                <button className="qz-btn" onClick={() => setPosition(position + 1)}>
                   Next question
                 </button>
               )}
@@ -3034,7 +4082,6 @@ function DeckBuilder({ view, generate, reload }: { view: DeckView; generate: str
   const act = useAct();
   const { deck, standings } = view;
   const alias = host.user?.alias ?? null;
-  const [mode, setMode] = useState<'builder' | 'source'>('builder');
   const [picked, setPicked] = useState<string | null>(deck.cards[0]?.id ?? null);
   const [draft, setDraft] = useState<Card | null>(null);
   const [count, setCount] = useState(generate ?? '20');
@@ -3086,7 +4133,10 @@ function DeckBuilder({ view, generate, reload }: { view: DeckView; generate: str
   const fromQuiz = (quiz: string): void => {
     void act('Could not make cards from the quiz', async () => {
       const made = await host.post<{ added: number }>(`cards/from-quiz?id=${Q(deck.id)}&quiz=${Q(quiz)}`);
-      host.toast(made.added === 0 ? 'The deck already has a card for every question of that quiz' : `Added ${made.added} ${made.added === 1 ? 'card' : 'cards'} from the quiz`, made.added === 0 ? 'info' : 'success');
+      host.toast(
+        made.added === 0 ? 'The deck already has a card for every question of that quiz' : `Added ${made.added} ${made.added === 1 ? 'card' : 'cards'} from the quiz`,
+        made.added === 0 ? 'info' : 'success',
+      );
       reload();
     });
   };
@@ -3094,20 +4144,12 @@ function DeckBuilder({ view, generate, reload }: { view: DeckView; generate: str
   const standing = held ? standings[held.id] : undefined;
   return (
     <>
-      <Row justify="between" wrap gap="sm">
-        <Seg>
-          <SegItem active={mode === 'builder'} selected={mode === 'builder'} onClick={() => setMode('builder')}>
-            Builder
-          </SegItem>
-          <SegItem active={mode === 'source'} selected={mode === 'source'} onClick={() => setMode('source')}>
-            Source
-          </SegItem>
-        </Seg>
+      <Row justify="end" wrap gap="sm">
         <Row gap="sm" wrap>
           <span style={{ width: 70 }}>
             <Input aria-label="How many cards to generate" type="number" value={count} onChange={(event: { target: HTMLInputElement }) => setCount(event.target.value)} />
           </span>
-          <Ask label="Generate cards" title={`Cards: ${deck.title}`} text={generateCardsText(deck, Number(count) || 20, alias)} />
+          <Generate label="Generate cards" title={`Cards: ${deck.title}`} text={generateCardsText(deck, Number(count) || 20, alias)} existing={deck.cards.length} noun="card" what="deck" />
           {withQuestions.length > 0 && (
             <span className="qz-add">
               <Select aria-label="Make cards from a quiz" value="" onChange={(event: { target: HTMLSelectElement }) => event.target.value && fromQuiz(event.target.value)}>
@@ -3132,9 +4174,7 @@ function DeckBuilder({ view, generate, reload }: { view: DeckView; generate: str
           <Notice>Press Generate cards to have your agent write them in Chat. They appear here as it adds them, and your agent opens the deck once the last one is in.</Notice>
         </div>
       )}
-      {mode === 'source' ? (
-        <SourceEditor id={deck.id} route="deck/source" what="deck" reload={reload} />
-      ) : (
+      {
         <div className="qz-builder" style={{ marginTop: 14 }}>
           <div className="qz-qlist">
             {rows.map((card, index) => {
@@ -3221,7 +4261,7 @@ function DeckBuilder({ view, generate, reload }: { view: DeckView; generate: str
             </div>
           )}
         </div>
-      )}
+      }
     </>
   );
 }
@@ -3440,7 +4480,9 @@ function Study({ deck, course, mode }: { deck: string | null; course: string | n
   const host = usePluginHost();
   const query = new URLSearchParams({ ...(deck ? { deck } : {}), ...(course ? { course } : {}), mode });
   const { data, error } = useData<StudyView>(`study?${query.toString()}`);
-  const sitting = useRef<{ queue: number[]; position: number; flipped: boolean; answers: Array<{ deck: string; card: string; got: boolean; at: string }>; again: Set<number>; saving: boolean } | null>(null);
+  const sitting = useRef<{ queue: number[]; position: number; flipped: boolean; answers: Array<{ deck: string; card: string; got: boolean; at: string }>; again: Set<number>; saving: boolean } | null>(
+    null,
+  );
   const [, redraw] = useState(0);
   const [finished, setFinished] = useState<Studied | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
@@ -3651,7 +4693,7 @@ function StudyDone({ studied, deck, course, back }: { studied: Studied; deck: st
               <>
                 <span className="qz-badge accent">Shared</span>
                 <span className="qz-small" style={{ flex: '1 1 300px' }}>
-                  This session is in your history and goes out with the next commit, so your progress follows you to any machine.
+                  This session is in your history and shared with the project, so your progress follows you to any machine.
                 </span>
               </>
             ) : (

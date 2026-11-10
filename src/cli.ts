@@ -6,7 +6,25 @@ import { existsSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { HostError, type CliEntry, type Host } from 'eidosmd/plugin';
 import { makeApi } from './api.ts';
-import { askable, cardProblems, compare, questionProblems, renderCourse, renderDeck, renderQuiz, studiable, type Card, type Question } from './model.ts';
+import {
+  askable,
+  blankQuestion,
+  cardProblems,
+  compare,
+  normalizeQuestion,
+  QUESTION_TYPE_NAMES,
+  questionProblems,
+  renderCourse,
+  renderDeck,
+  renderQuiz,
+  referenceLink,
+  studiable,
+  TRUE_FALSE,
+  typeFromWords,
+  type Card,
+  type Question,
+  type Quiz,
+} from './model.ts';
 
 export type { Api } from './api.ts';
 
@@ -33,19 +51,86 @@ function say(json: boolean, value: unknown, words: string): void {
 const asPercent = (fraction: number | null): string => (fraction === null ? '-' : `${Math.round(fraction * 100)}%`);
 
 interface QuestionOptions {
+  type?: string;
   prompt?: string;
+  context?: string;
+  image?: string;
+  points?: string;
   option: string[];
-  answer?: string;
+  answer: string[];
+  accept: string[];
+  item: string[];
+  pair: string[];
+  model?: string;
+  covers?: string;
   why?: string;
   reference?: string;
 }
 
-// The option a person means: its 1-based number, as the options are listed.
-function answerIndex(value: string | undefined, options: string[]): number | null {
-  if (value === undefined) return null;
-  const number = Number(value);
-  if (!Number.isInteger(number) || number < 1 || number > options.length) throw new HostError(400, `--answer is the option's number, 1 to ${options.length}`);
-  return number - 1;
+// The options a person means: their 1-based numbers, as the options are listed, or True and
+// False by name for a true or false question.
+function answerIndexes(values: string[], options: string[]): number[] {
+  return values.map((value) => {
+    const named = options.findIndex((option) => option.toLowerCase() === value.trim().toLowerCase());
+    if (named >= 0 && !/^\d+$/.test(value.trim())) return named;
+    const number = Number(value);
+    if (!Number.isInteger(number) || number < 1 || number > options.length) throw new HostError(400, `--answer is an option's number, 1 to ${options.length}`);
+    return number - 1;
+  });
+}
+
+function pairOf(value: string): { left: string; right: string } {
+  const match = /^(.*?)\s*(?:→|->|=>)\s*(.*)$/.exec(value);
+  if (!match || !match[1]!.trim() || !match[2]!.trim()) throw new HostError(400, `--pair is "left -> right", and "${value}" is not`);
+  return { left: match[1]!.trim(), right: match[2]!.trim() };
+}
+
+// A question from the command's options, over the one it replaces when there is one: what the
+// options name changes, and the rest stays.
+function questionFrom(options: QuestionOptions, id: string, held: Question | null): Question {
+  let type = held?.type ?? 'choice';
+  if (options.type !== undefined) {
+    const named = typeFromWords(options.type);
+    if (!named)
+      throw new HostError(
+        400,
+        `--type is one of: ${Object.values(QUESTION_TYPE_NAMES)
+          .map((name) => name.toLowerCase().replace(/ /g, '-'))
+          .join(', ')}`,
+      );
+    type = named;
+  }
+  const base =
+    held && held.type === type
+      ? { ...held, id }
+      : {
+          ...blankQuestion(id, type),
+          prompt: held?.prompt ?? '',
+          context: held?.context ?? '',
+          image: held?.image ?? '',
+          points: held?.points ?? 1,
+          why: held?.why ?? '',
+          reference: held?.reference ?? '',
+        };
+  const question: Question = { ...base };
+  if (options.prompt !== undefined) question.prompt = options.prompt;
+  if (options.context !== undefined) question.context = options.context;
+  if (options.image !== undefined) question.image = options.image;
+  if (options.points !== undefined) question.points = Number(options.points);
+  if (options.why !== undefined) question.why = options.why;
+  if (options.reference !== undefined) question.reference = options.reference;
+  if (type === 'truefalse') question.options = [...TRUE_FALSE];
+  else if (options.option.length > 0) {
+    question.options = options.option;
+    question.correct = [];
+  }
+  if (options.answer.length > 0) question.correct = answerIndexes(options.answer, question.options);
+  if (options.accept.length > 0) question.accepted = options.accept;
+  if (options.item.length > 0) question.items = options.item;
+  if (options.pair.length > 0) question.pairs = options.pair.map(pairOf);
+  if (options.model !== undefined) question.model = options.model;
+  if (options.covers !== undefined) question.covers = options.covers;
+  return normalizeQuestion(question);
 }
 
 function checkedCard(card: Card): Card {
@@ -77,10 +162,14 @@ const entry: CliEntry = {
             const overview = api.overview();
             const where = (row: { course_title: string | null; place: number | null }): string => (row.course_title ? `${row.course_title} ${row.place}` : 'one-off');
             const lines = [
-              ...overview.quizzes.map((row) => `${row.id}  quiz  ${row.title}  ·  ${where(row)}  ·  ${row.status === 'closed' ? 'closed  ·  ' : ''}${row.questions} questions  ·  best ${asPercent(row.best)}`),
+              ...overview.quizzes.map(
+                (row) => `${row.id}  quiz  ${row.title}  ·  ${where(row)}  ·  ${row.status === 'closed' ? 'closed  ·  ' : ''}${row.questions} questions  ·  best ${asPercent(row.best)}`,
+              ),
               ...overview.decks.map((row) => `${row.id}  deck  ${row.title}  ·  ${where(row)}  ·  ${row.status === 'closed' ? 'closed  ·  ' : ''}${row.cards} cards  ·  ${row.learned} learned`),
             ];
-            const left = overview.quizzes_left ? `\n\nQuizzes left ${overview.quizzes_left.quizzes} quizzes and ${overview.quizzes_left.results} result files here; eidos academy move-quizzes brings them into Academy` : '';
+            const left = overview.quizzes_left
+              ? `\n\nQuizzes left ${overview.quizzes_left.quizzes} quizzes and ${overview.quizzes_left.results} result files here; eidos academy move-quizzes brings them into Academy`
+              : '';
             say(json, overview, (lines.join('\n') || 'nothing yet; eidos academy quiz new "<Title>" or eidos academy deck new "<Title>" starts one') + left);
           });
         });
@@ -137,11 +226,15 @@ const entry: CliEntry = {
         .option('--created-by <alias>', 'hand it to another creator')
         .option('--add-proctor <alias>', 'a proctor (repeatable)', collect, [] as string[])
         .option('--remove-proctor <alias>', 'no longer a proctor (repeatable)', collect, [] as string[])
+        .option('--shuffle-questions <on|off>', 'each attempt takes the questions in a new order; on unless set')
+        .option('--shuffle-options <on|off>', "each attempt takes a question's options, items, and pairs in a new order; on unless set")
         .option('--json', 'the quiz')
         .action(
           async (
             id: string,
             options: {
+              shuffleQuestions?: string;
+              shuffleOptions?: string;
               status?: string;
               title?: string;
               addSource: string[];
@@ -156,6 +249,13 @@ const entry: CliEntry = {
           ) => {
             await run(command, async (json) => {
               let quiz = store.quiz(id);
+              const onOff = (value: string | undefined, flag: string): boolean | undefined => {
+                if (value === undefined) return undefined;
+                if (value !== 'on' && value !== 'off') throw new HostError(400, `${flag} is on or off`);
+                return value === 'on';
+              };
+              const shuffleQuestions = onOff(options.shuffleQuestions, '--shuffle-questions');
+              const shuffleOptions = onOff(options.shuffleOptions, '--shuffle-options');
               if (options.status !== undefined && options.status !== 'open' && options.status !== 'closed') throw new HostError(400, '--status is open or closed');
               if (options.status === 'open' && askable(quiz).length === 0) throw new HostError(400, 'add a question before opening this quiz');
               if (options.course !== undefined) quiz = await store.moveQuiz(quiz.id, options.course === '' ? null : store.course(options.course).id);
@@ -166,6 +266,8 @@ const entry: CliEntry = {
                 ...(options.status ? { closed: options.status === 'closed' } : {}),
                 ...(options.title ? { title: options.title } : {}),
                 ...(options.createdBy ? { created_by: options.createdBy } : {}),
+                ...(shuffleQuestions !== undefined ? { shuffle_questions: shuffleQuestions } : {}),
+                ...(shuffleOptions !== undefined ? { shuffle_options: shuffleOptions } : {}),
                 draws_from: [...new Set([...quiz.draws_from.filter((source) => !options.removeSource.includes(source)), ...options.addSource])],
                 proctors: [...new Set([...quiz.proctors.filter((alias) => !options.removeProctor.includes(alias)), ...options.addProctor])],
               });
@@ -191,25 +293,27 @@ const entry: CliEntry = {
       const question = academy.command('question').description("add, change, or remove a quiz's questions");
       const questionFlags = (command: ReturnType<typeof question.command>) =>
         command
+          .option('--type <type>', 'multiple-choice (absent, on a new question), true-or-false, check-all, short-answer, put-in-order, match, or written-answer')
           .option('--prompt <text>', 'what is asked')
-          .option('--option <text>', 'an option, in order (repeatable, two to five)', collect, [] as string[])
-          .option('--answer <n>', "the right option's number, from 1")
-          .option('--why <text>', 'why that answer is right')
-          .option('--reference <text>', 'where it comes from')
+          .option('--context <text>', 'shown under the prompt while it is answered: a passage, a hint, or more about what it asks')
+          .option('--image <asset>', "an image from the project's assets, by its path")
+          .option('--points <n>', 'what it is worth; absent, 1')
+          .option('--option <text>', 'an option, in order (repeatable): multiple choice takes two to five, check-all two to eight', collect, [] as string[])
+          .option('--answer <n>', "a right option's number, from 1 (repeatable for check-all); true or false takes True or False", collect, [] as string[])
+          .option('--accept <text>', 'an accepted short answer (repeatable)', collect, [] as string[])
+          .option('--item <text>', 'an item to put in order, in its right place (repeatable, two to eight)', collect, [] as string[])
+          .option('--pair <pair>', 'a pair to match, as "left -> right" (repeatable, two to eight)', collect, [] as string[])
+          .option('--model <text>', "a written answer's model answer, shown once it is submitted")
+          .option('--covers <text>', 'what a full written answer covers, which the grader grades against')
+          .option('--why <text>', 'why that answer is right (every type but a written answer)')
+          .option('--reference <ref>', 'where it comes from: a blueprint id, with #section or not, an asset path, or a link')
           .option('--json', 'the question');
 
       questionFlags(question.command('add').argument('<quiz>', "the quiz's id").description('add a question to the end of a quiz')).action(
         async (id: string, options: QuestionOptions, command: Options) => {
           await run(command, async (json) => {
             const quiz = store.quiz(id);
-            const added = checked({
-              id: store.newQuestionId(quiz),
-              prompt: options.prompt ?? '',
-              options: options.option,
-              answer: answerIndex(options.answer, options.option),
-              why: options.why ?? '',
-              reference: options.reference ?? '',
-            });
+            const added = checked(questionFrom(options, store.newQuestionId(quiz), null));
             await store.saveQuiz({ ...quiz, questions: [...quiz.questions, added] });
             say(json, added, `added ${added.id} to ${quiz.id}`);
           });
@@ -229,15 +333,7 @@ const entry: CliEntry = {
           const at = quiz.questions.findIndex((held) => held.id === questionId);
           const held = quiz.questions[at];
           if (!held) throw new HostError(404, `${quiz.id} has no question ${questionId}`);
-          const choices = options.option.length > 0 ? options.option : held.options;
-          const changed = checked({
-            id: options.regenerated ? store.newQuestionId(quiz) : held.id,
-            prompt: options.prompt ?? held.prompt,
-            options: choices,
-            answer: answerIndex(options.answer, choices) ?? (options.option.length > 0 ? null : held.answer),
-            why: options.why ?? held.why,
-            reference: options.reference ?? held.reference,
-          });
+          const changed = checked(questionFrom(options, options.regenerated ? store.newQuestionId(quiz) : held.id, held));
           const questions = [...quiz.questions];
           questions[at] = changed;
           await store.saveQuiz({ ...quiz, questions });
@@ -257,6 +353,50 @@ const entry: CliEntry = {
             if (!quiz.questions.some((held) => held.id === questionId)) throw new HostError(404, `${quiz.id} has no question ${questionId}`);
             await store.saveQuiz({ ...quiz, questions: quiz.questions.filter((held) => held.id !== questionId) });
             say(json, { removed: questionId }, `removed ${questionId} from ${quiz.id}`);
+          });
+        });
+
+      // ---- grading written answers (Academy REQ65 to REQ67) ----
+
+      const grade = academy.command('grade').description("grade the written answers of a quiz's official attempts");
+      grade
+        .command('list')
+        .argument('<quiz>', "the quiz's id")
+        .description('the written answers waiting for a grade, oldest first, and those graded')
+        .option('--json', '{ waiting, graded }')
+        .action(async (id: string, _options: unknown, command: Options) => {
+          await run(command, (json) => {
+            const listed = api.toGrade(id);
+            const line = (answer: (typeof listed.waiting)[number]) =>
+              `${answer.attempt}  ${answer.question.id}  ${answer.name}  ${answer.completed_at.slice(0, 10)}  out of ${answer.question.points}\n  Q: ${answer.question.prompt}\n  A: ${answer.response.replace(/\s*\n\s*/g, ' ')}${answer.suggestion ? `\n  suggested: ${answer.suggestion.points}` : ''}`;
+            say(json, listed, listed.waiting.length === 0 ? 'no written answer waits for a grade' : `${listed.waiting.length} waiting\n\n${listed.waiting.map(line).join('\n\n')}`);
+          });
+        });
+      grade
+        .command('add')
+        .argument('<quiz>', "the quiz's id")
+        .argument('<attempt>', "the attempt's id")
+        .argument('<question>', "the written answer's question id")
+        .description('grade one written answer; the latest grade counts')
+        .requiredOption('--points <n>', "points from 0 to the question's points")
+        .option('--note <text>', 'a note to the person, shown with the grade')
+        .option('--ai', 'the grader asked their own agent for this grade, and it says so')
+        .option('--suggestion', 'only suggest it: the grader accepts or changes it before it counts')
+        .option('--for <alias>', 'an agent grades for the person who asked it, who must grade this quiz')
+        .option('--json', 'the grade')
+        .action(async (id: string, attempt: string, questionId: string, options: { points: string; note?: string; ai?: boolean; suggestion?: boolean; for?: string }, command: Options) => {
+          await run(command, async (json) => {
+            const given = await api.grade({
+              quiz: id,
+              attempt,
+              question: questionId,
+              points: Number(options.points),
+              note: options.note,
+              ai: options.ai,
+              suggestion: options.suggestion,
+              for: options.for,
+            });
+            say(json, given, `${given.suggestion ? 'suggested' : 'graded'} ${given.points} for ${given.person}'s answer to ${given.question}`);
           });
         });
 
@@ -322,7 +462,19 @@ const entry: CliEntry = {
         .action(
           async (
             id: string,
-            options: { status?: string; title?: string; addSource: string[]; removeSource: string[]; course?: string; place?: string; perSession?: string; createdBy?: string; addProctor: string[]; removeProctor: string[]; addFromQuiz?: string },
+            options: {
+              status?: string;
+              title?: string;
+              addSource: string[];
+              removeSource: string[];
+              course?: string;
+              place?: string;
+              perSession?: string;
+              createdBy?: string;
+              addProctor: string[];
+              removeProctor: string[];
+              addFromQuiz?: string;
+            },
             command: Options,
           ) => {
             await run(command, async (json) => {
@@ -426,8 +578,7 @@ const entry: CliEntry = {
             say(
               json,
               { courses },
-              courses.map((held) => `${held.id}  ${held.title}  ·  ${store.inCourse(held.id).length} quizzes and decks`).join('\n') ||
-                'no courses yet; eidos academy course new "<Title>" starts one',
+              courses.map((held) => `${held.id}  ${held.title}  ·  ${store.inCourse(held.id).length} quizzes and decks`).join('\n') || 'no courses yet; eidos academy course new "<Title>" starts one',
             );
           });
         });
@@ -566,7 +717,11 @@ const entry: CliEntry = {
         .action(async (id: string, _options: unknown, command: Options) => {
           await run(command, async (json) => {
             const removed = await store.removeCourse(id);
-            say(json, { removed: removed.course.id, quizzes: removed.quizzes, decks: removed.decks }, `removed ${removed.course.id}; ${removed.quizzes} quizzes and ${removed.decks} decks are one-offs now`);
+            say(
+              json,
+              { removed: removed.course.id, quizzes: removed.quizzes, decks: removed.decks },
+              `removed ${removed.course.id}; ${removed.quizzes} quizzes and ${removed.decks} decks are one-offs now`,
+            );
           });
         });
 
@@ -609,7 +764,7 @@ const entry: CliEntry = {
 
       academy
         .command('move-quizzes')
-        .description('bring in what the Quizzes plugin, Academy\'s name before 0.3.0, left in this project: its quizzes, courses, results, and practice')
+        .description("bring in what the Quizzes plugin, Academy's name before 0.3.0, left in this project: its quizzes, courses, results, and practice")
         .option('--dry-run', 'say what would move, and move nothing')
         .option('--json', '{ quizzes, courses, results, folder, then[] }')
         .action(async (options: { dryRun?: boolean }, command: Options) => {
@@ -620,7 +775,11 @@ const entry: CliEntry = {
               return;
             }
             if (options.dryRun) {
-              say(json, { ...left, dry_run: true }, `would move ${left.files.length} files from ${left.folder ?? 'nowhere'}/ into ${store.folderName()}/, and ${left.results.length} result and practice files into Academy's workspace`);
+              say(
+                json,
+                { ...left, dry_run: true },
+                `would move ${left.files.length} files from ${left.folder ?? 'nowhere'}/ into ${store.folderName()}/, and ${left.results.length} result and practice files into Academy's workspace`,
+              );
               return;
             }
             const moved = api.moveFromQuizzes();
@@ -671,7 +830,12 @@ const entry: CliEntry = {
       run: () => {
         const left = store.quizzesLeft();
         if (left.files.length + left.results.length === 0) return [];
-        return [{ path: left.folder ?? '.eidos/plugins/quizzes', message: `Quizzes, Academy's name before 0.3.0, left ${left.files.length} quizzes and courses and ${left.results.length} result files here; eidos academy move-quizzes brings them into Academy` }];
+        return [
+          {
+            path: left.folder ?? '.eidos/plugins/quizzes',
+            message: `Quizzes, Academy's name before 0.3.0, left ${left.files.length} quizzes and courses and ${left.results.length} result files here; eidos academy move-quizzes brings them into Academy`,
+          },
+        ];
       },
     });
     host.finding({
@@ -691,21 +855,54 @@ const entry: CliEntry = {
       },
     });
 
+    host.finding({
+      code: 'reference-gone',
+      level: 'warning',
+      run: () => {
+        const context = host.context();
+        const byId = new Map(context.blueprints.map((blueprint) => [String(blueprint.properties?.['id'] ?? ''), blueprint]));
+        return store.list().quizzes.flatMap((quiz) =>
+          quiz.questions.flatMap((held) => {
+            const link = referenceLink(held.reference);
+            if (!link) return [];
+            const gone = (what: string) => [{ path: quiz.path, message: `question ${held.id} references ${what}, which is gone` }];
+            if (link.kind === 'asset') return existsSync(path.join(context.root, link.path)) ? [] : gone(link.path);
+            if (link.kind !== 'blueprint') return [];
+            const blueprint = byId.get(link.id);
+            if (!blueprint) return gone(link.id);
+            if (link.section && !blueprint.headings.some((heading) => heading.text.trim().toLowerCase() === link.section!.toLowerCase())) return gone(`the section ${link.section} of ${link.id}`);
+            return [];
+          }),
+        );
+      },
+    });
+
     // ---- a blueprint's new id follows into what names it (Surfaces REQ12) ----
 
     host.onIdChange((changes) => {
       const renamed = new Map(changes.filter((change) => change.kind === undefined || change.kind === 'blueprint').map((change) => [change.from, change.to]));
       if (renamed.size === 0) return [];
       const follow = (list: string[]): string[] => list.map((item) => renamed.get(item) ?? item);
+      // a question's reference names a blueprint by id, with a section after # or not
+      const followReference = (reference: string): string => {
+        const link = referenceLink(reference);
+        if (link?.kind !== 'blueprint' || !renamed.has(link.id)) return reference;
+        return `${renamed.get(link.id)}${link.section ? `#${link.section}` : ''}`;
+      };
+      const referencesRenamed = (quiz: Quiz): boolean => quiz.questions.some((held) => followReference(held.reference) !== held.reference);
       const listed = store.list();
       const root = host.context().root;
       return [
         ...listed.quizzes
-          .filter((quiz) => quiz.draws_from.some((source) => renamed.has(source)))
+          .filter((quiz) => quiz.draws_from.some((source) => renamed.has(source)) || referencesRenamed(quiz))
           .map((quiz) => ({
             path: quiz.path,
-            what: `what ${quiz.id} draws from`,
-            apply: () => writeFileSync(path.join(root, quiz.path), renderQuiz({ ...quiz, draws_from: follow(quiz.draws_from) })),
+            what: `what ${quiz.id} draws from and its questions' references`,
+            apply: () =>
+              writeFileSync(
+                path.join(root, quiz.path),
+                renderQuiz({ ...quiz, draws_from: follow(quiz.draws_from), questions: quiz.questions.map((held) => ({ ...held, reference: followReference(held.reference) })) }),
+              ),
           })),
         ...listed.decks
           .filter((held) => held.draws_from.some((source) => renamed.has(source)))

@@ -3,16 +3,9 @@
 // the disk, so the page, the commands, and the tests all get the same answers.
 import { randomBytes } from 'node:crypto';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
+import { answerText, blankQuestion, isRight, questionProblems, responseProblem, TYPE_WORDS, typeFromWords, type Question, type QuestionType, type Response } from './question.ts';
 
-export interface Question {
-  id: string;
-  prompt: string;
-  options: string[];
-  // the index of the right option, null while the question has none marked
-  answer: number | null;
-  why: string;
-  reference: string;
-}
+export * from './question.ts';
 
 export type QuizStatus = 'open' | 'closed';
 
@@ -31,6 +24,9 @@ export interface Quiz {
   rank: number;
   // the course's id, from the folder it sits in; null for a one-off
   course: string | null;
+  // each attempt takes the questions, and their options, in a new order (Academy REQ62)
+  shuffle_questions: boolean;
+  shuffle_options: boolean;
   questions: Question[];
   // root-relative
   path: string;
@@ -51,10 +47,27 @@ export interface Course {
 export type AttemptKind = 'official' | 'practice';
 export type AttemptMode = 'whole' | 'missed' | 'unseen';
 
+export interface GradeMark {
+  points: number;
+  note: string;
+  by: string;
+  ai: boolean;
+  at: string;
+}
+
 export interface AttemptAnswer {
   // a copy of the question as it was asked (Academy REQ17)
-  question: Omit<Question, 'answer'> & { answer: number };
-  chosen: number;
+  question: Question;
+  // the option picked, kept for multiple choice and true or false as attempts before 0.3.0 had it
+  chosen?: number;
+  response: Response;
+  // the points it earned; null while a written answer waits for a grade (Academy REQ63)
+  earned: number | null;
+  // a written answer in practice, marked by the person themselves (Academy REQ64)
+  self_marked?: boolean;
+  // filled from the grades when the attempt is read, never written in the attempt's file
+  grade?: GradeMark;
+  suggestion?: GradeMark;
 }
 
 export interface Attempt {
@@ -65,9 +78,30 @@ export interface Attempt {
   mode: AttemptMode;
   by: string;
   completed_at: string;
+  // points earned, and the points of every question asked
   score: number;
   total: number;
   answers: AttemptAnswer[];
+  // how many written answers still wait for a grade; filled when the attempt is read
+  waiting?: number;
+}
+
+// A grade of one written answer, kept in the grader's own folder (Academy REQ66).
+export interface Grade {
+  id: string;
+  attempt: string;
+  // whose attempt it is
+  person: string;
+  quiz: string;
+  question: string;
+  points: number;
+  note: string;
+  by: string;
+  // the grader's own agent gave it
+  ai: boolean;
+  // a suggestion waits for the grader to accept or change it
+  suggestion: boolean;
+  at: string;
 }
 
 // ---- ids ---------------------------------------------------------------------------
@@ -121,8 +155,8 @@ function joinFrontmatter(data: Record<string, unknown>, body: string): string {
 
 // ---- a quiz's file -------------------------------------------------------------------
 
-// A quiz reads as a page: each question under a heading holding its id, its prompt, its
-// options as a checklist with the answer ticked, then the reason and the reference.
+// A quiz reads as a page: each question under a heading holding its id, its type when it
+// is not multiple choice, its prompt, then what its type takes, the reason, and the reference.
 //
 //   ## q-abc12
 //
@@ -133,70 +167,126 @@ function joinFrontmatter(data: Record<string, unknown>, body: string): string {
 //
 //   **Why:** The lecturer stresses it was where God lived.
 //
-//   **Reference:** Lesson 10, section A
+//   **Reference:** B-K41#A. The tabernacle
+//
+// Check all that are true ticks every right option; a short answer lists its accepted answers
+// as plain bullets; put in order numbers its items in their right order; match writes each
+// pair as `- left → right`; a written answer has a **Model answer:** and **Covers:**.
 const OPTION = /^\s*[-*]\s+\[( |x|X)\]\s+(.*)$/;
-const WHY = /^\*\*Why:\*\*\s*(.*)$/;
+const ITEM = /^\s*\d+[.)]\s+(.*)$/;
+const BULLET = /^\s*[-*]\s+(.*)$/;
+const PAIR = /^(.*?)\s*(?:→|->)\s*(.*)$/;
 const REFERENCE = /^\*\*Reference:\*\*\s*(.*)$/;
+const FIELD = /^\*\*(Type|Context|Image|Points|Why|Reference|Model answer|Covers):\*\*\s*(.*)$/;
 
 export function parseQuestions(body: string): Question[] {
   const questions: Question[] = [];
-  interface Reading {
-    id: string;
-    prompt: string[];
-    options: string[];
-    answer: number | null;
-    why: string[];
-    reference: string;
-    part: 'prompt' | 'why' | 'done';
-  }
+  type Part = 'prompt' | 'context' | 'why' | 'model' | 'covers' | 'done';
+  type Reading = Question & { lines: Record<Exclude<Part, 'done'>, string[]>; part: Part };
   let held: Reading | null = null;
   const finish = (): void => {
     if (!held) return;
-    questions.push({ id: held.id, prompt: held.prompt.join('\n').trim(), options: held.options, answer: held.answer, why: held.why.join('\n').trim(), reference: held.reference });
+    const { lines, part: _part, ...question } = held;
+    questions.push({
+      ...question,
+      prompt: lines.prompt.join('\n').trim(),
+      context: lines.context.join('\n').trim(),
+      why: lines.why.join('\n').trim(),
+      model: lines.model.join('\n').trim(),
+      covers: lines.covers.join('\n').trim(),
+      answer: question.correct[0] ?? null,
+    });
     held = null;
   };
   for (const line of body.split(/\r?\n/)) {
     const heading = /^##\s+(\S+)\s*$/.exec(line);
     if (heading) {
       finish();
-      held = { id: heading[1]!, prompt: [], options: [], answer: null, why: [], reference: '', part: 'prompt' };
+      held = { ...blankQuestion(heading[1]!), options: [], lines: { prompt: [], context: [], why: [], model: [], covers: [] }, part: 'prompt' };
       continue;
     }
     if (!held) continue;
+    const current: Reading = held;
+    const field = FIELD.exec(line);
+    if (field) {
+      const [, key, value] = field;
+      const single = (): void => {
+        current.part = current.lines.prompt.join('').trim() ? 'done' : 'prompt';
+      };
+      if (key === 'Type') {
+        current.type = typeFromWords(value!) ?? 'choice';
+        single();
+      } else if (key === 'Image') {
+        current.image = value!.trim();
+        single();
+      } else if (key === 'Points') {
+        const points = Number.parseInt(value!, 10);
+        current.points = Number.isInteger(points) && points > 0 ? points : 1;
+        single();
+      } else if (key === 'Reference') {
+        current.reference = value!.trim();
+        current.part = 'done';
+      } else {
+        const part = key === 'Context' ? 'context' : key === 'Why' ? 'why' : key === 'Model answer' ? 'model' : 'covers';
+        current.lines[part].push(value!);
+        current.part = part;
+      }
+      continue;
+    }
     const option = OPTION.exec(line);
     if (option) {
-      if (option[1]!.toLowerCase() === 'x' && held.answer === null) held.answer = held.options.length;
-      held.options.push(option[2]!.trim());
-      held.part = 'done';
+      if (option[1]!.toLowerCase() === 'x') current.correct.push(current.options.length);
+      current.options.push(option[2]!.trim());
+      current.part = 'done';
       continue;
     }
-    const why = WHY.exec(line);
-    if (why) {
-      held.why.push(why[1]!);
-      held.part = 'why';
+    const item = ITEM.exec(line);
+    if (item && current.type === 'order') {
+      current.items.push(item[1]!.trim());
+      current.part = 'done';
       continue;
     }
-    const reference = REFERENCE.exec(line);
-    if (reference) {
-      held.reference = reference[1]!.trim();
-      held.part = 'done';
+    const bullet = BULLET.exec(line);
+    if (bullet && (current.type === 'short' || current.type === 'match')) {
+      const pair = current.type === 'match' ? PAIR.exec(bullet[1]!) : null;
+      if (pair) current.pairs.push({ left: pair[1]!.trim(), right: pair[2]!.trim() });
+      else if (current.type === 'short') current.accepted.push(bullet[1]!.trim());
+      current.part = 'done';
       continue;
     }
-    if (held.part === 'prompt') held.prompt.push(line);
-    else if (held.part === 'why') held.why.push(line);
+    if (current.part !== 'done') current.lines[current.part].push(line);
   }
   finish();
   return questions;
 }
 
+const oneLine = (value: string): string => value.replace(/\s*\n\s*/g, ' ').trim();
+
 export function renderQuestions(questions: Question[]): string {
   return questions
     .map((question) => {
-      const options = question.options.map((option, index) => `- [${index === question.answer ? 'x' : ' '}] ${option.replace(/\s*\n\s*/g, ' ').trim()}`).join('\n');
-      const parts = [`## ${question.id}`, question.prompt.trim(), options];
+      const parts = [`## ${question.id}`];
+      if (question.type !== 'choice') parts.push(`**Type:** ${TYPE_WORDS[question.type]}`);
+      parts.push(question.prompt.trim());
+      if (question.context.trim()) parts.push(`**Context:** ${question.context.trim()}`);
+      if (question.image.trim()) parts.push(`**Image:** ${question.image.trim()}`);
+      if (question.points !== 1) parts.push(`**Points:** ${question.points}`);
+      if (question.type === 'choice' || question.type === 'truefalse' || question.type === 'all') {
+        const right = new Set(question.type === 'all' ? question.correct : question.answer === null ? [] : [question.answer]);
+        parts.push(question.options.map((option, index) => `- [${right.has(index) ? 'x' : ' '}] ${oneLine(option)}`).join('\n'));
+      } else if (question.type === 'short') {
+        parts.push(question.accepted.map((answer) => `- ${oneLine(answer)}`).join('\n'));
+      } else if (question.type === 'order') {
+        parts.push(question.items.map((item, index) => `${index + 1}. ${oneLine(item)}`).join('\n'));
+      } else if (question.type === 'match') {
+        parts.push(question.pairs.map((pair) => `- ${oneLine(pair.left)} → ${oneLine(pair.right)}`).join('\n'));
+      } else {
+        if (question.model.trim()) parts.push(`**Model answer:** ${question.model.trim()}`);
+        if (question.covers.trim()) parts.push(`**Covers:** ${question.covers.trim()}`);
+      }
       if (question.why.trim()) parts.push(`**Why:** ${question.why.trim()}`);
-      if (question.reference.trim()) parts.push(`**Reference:** ${question.reference.replace(/\s*\n\s*/g, ' ').trim()}`);
-      return parts.join('\n\n');
+      if (question.reference.trim()) parts.push(`**Reference:** ${oneLine(question.reference)}`);
+      return parts.filter((part) => part !== '').join('\n\n');
     })
     .join('\n\n');
 }
@@ -217,6 +307,8 @@ export function parseQuiz(source: string, path: string, course: string | null): 
     closed,
     rank: typeof data['rank'] === 'number' ? data['rank'] : Number.MAX_SAFE_INTEGER,
     course,
+    shuffle_questions: data['shuffle_questions'] !== false,
+    shuffle_options: data['shuffle_options'] !== false,
     questions,
     path,
   };
@@ -232,20 +324,11 @@ export function renderQuiz(quiz: Quiz): string {
       proctors: quiz.proctors,
       status: quiz.closed ? 'closed' : null,
       rank: quiz.rank === Number.MAX_SAFE_INTEGER ? null : quiz.rank,
+      shuffle_questions: quiz.shuffle_questions ? null : false,
+      shuffle_options: quiz.shuffle_options ? null : false,
     },
     renderQuestions(quiz.questions),
   );
-}
-
-// What is wrong with a question, in words a person acts on; empty when it can be asked.
-export function questionProblems(question: Question): string[] {
-  const problems: string[] = [];
-  if (!question.prompt.trim()) problems.push('it has no prompt');
-  if (question.options.length < 2 || question.options.length > 5)
-    problems.push(`it has ${question.options.length} option${question.options.length === 1 ? '' : 's'}, and a question takes two to five`);
-  if (question.options.some((option) => !option.trim())) problems.push('one of its options is empty');
-  if (question.answer === null || question.answer < 0 || question.answer >= question.options.length) problems.push('none of its options is marked as the answer');
-  return problems;
 }
 
 export function askable(quiz: Pick<Quiz, 'questions'>): Question[] {
@@ -436,10 +519,11 @@ export function renderDeck(deck: Deck): string {
   );
 }
 
-// A quiz's questions as cards: the prompt on the front, the answer and why it is right on the back.
+// A quiz's questions as cards: the prompt on the front, and on the back its answer in words,
+// with why it is right (Academy REQ48).
 export function cardsFromQuiz(quiz: Pick<Quiz, 'questions'>, newId: () => string): Card[] {
   return askable(quiz).map((question) => {
-    const answer = question.options[question.answer!]!.trim();
+    const answer = answerText(question).replace(/[.\s]+$/, '');
     const why = question.why.trim();
     return { id: newId(), front: question.prompt.trim(), back: why ? `${answer}. ${why}` : answer, reference: question.reference.trim() };
   });
@@ -472,7 +556,15 @@ export interface Review {
   answers: ReviewAnswer[];
 }
 
-export function makeReview(input: { id: string; deck: Deck; by: string; mode: StudyMode; startedAt: string; completedAt: string; answers: Array<{ card: string; got: boolean; at?: string }> }): Review {
+export function makeReview(input: {
+  id: string;
+  deck: Deck;
+  by: string;
+  mode: StudyMode;
+  startedAt: string;
+  completedAt: string;
+  answers: Array<{ card: string; got: boolean; at?: string }>;
+}): Review {
   const byId = new Map(input.deck.cards.map((card) => [card.id, card]));
   const answers: ReviewAnswer[] = input.answers.map((answer) => {
     const card = byId.get(answer.card);
@@ -586,7 +678,11 @@ export function cardsToStudy(deck: Pick<Deck, 'cards' | 'per_session'>, reviews:
 function orderForStudy(deck: Pick<Deck, 'cards'>, reviews: Review[]): CardStanding[] {
   const held = [...standings(deck, reviews).values()];
   const oldest = (a: CardStanding, b: CardStanding): number => (a.last_seen ?? '').localeCompare(b.last_seen ?? '');
-  return [...held.filter((standing) => standing.state === 'learning').sort(oldest), ...held.filter((standing) => standing.state === 'new'), ...held.filter((standing) => standing.state === 'learned').sort(oldest)];
+  return [
+    ...held.filter((standing) => standing.state === 'learning').sort(oldest),
+    ...held.filter((standing) => standing.state === 'new'),
+    ...held.filter((standing) => standing.state === 'learned').sort(oldest),
+  ];
 }
 
 // A sitting across several decks, in the same order, the decks taking turns within each kind.
@@ -609,31 +705,72 @@ export function cardsAcross(decks: Array<{ deck: Pick<Deck, 'id' | 'cards'>; rev
 
 // ---- an attempt -----------------------------------------------------------------------
 
+// An attempt from before 0.3.0 holds multiple choice alone, one point a question, the option
+// picked as `chosen`; it reads as one of today's.
+function upgradeQuestion(question: Partial<Question> & { id: string }): Question {
+  const base = blankQuestion(question.id, question.type ?? 'choice');
+  const merged = { ...base, ...question, options: question.options ?? base.options };
+  if (!question.correct) merged.correct = typeof question.answer === 'number' ? [question.answer] : [];
+  merged.answer = merged.correct[0] ?? null;
+  return merged;
+}
+
 export function parseAttempt(source: string): Attempt {
   const data = parseYaml(source) as Attempt;
   if (!data || typeof data !== 'object' || !data.id || !data.quiz || !Array.isArray(data.answers)) throw new Error('it is not an attempt');
+  data.answers = data.answers.map((answer) => {
+    const question = upgradeQuestion(answer.question);
+    const response = answer.response ?? answer.chosen ?? null;
+    const earned = answer.earned === undefined ? (isRight(question, response as Response) ? question.points : 0) : answer.earned;
+    return { ...answer, question, response: response as Response, earned };
+  });
   return data;
 }
 
 export function renderAttempt(attempt: Attempt): string {
-  return stringifyYaml(attempt, { lineWidth: 0 });
+  const { waiting: _waiting, ...kept } = attempt;
+  return stringifyYaml({ ...kept, answers: kept.answers.map(({ grade: _grade, suggestion: _suggestion, ...answer }) => answer) }, { lineWidth: 0 });
 }
 
-export function makeAttempt(input: { id: string; quiz: Quiz; kind: AttemptKind; mode: AttemptMode; by: string; completedAt: string; answers: Array<{ question: string; chosen: number }> }): Attempt {
+export interface GivenAnswer {
+  question: string;
+  response?: Response;
+  // the option picked, as the page and the commands sent it before 0.3.0
+  chosen?: number;
+  // a written answer in practice: the person's own mark against the model answer
+  self_marked?: boolean;
+}
+
+export function makeAttempt(input: { id: string; quiz: Quiz; kind: AttemptKind; mode: AttemptMode; by: string; completedAt: string; answers: GivenAnswer[] }): Attempt {
   const byId = new Map(input.quiz.questions.map((question) => [question.id, question]));
-  const answers: AttemptAnswer[] = input.answers.map((answer) => {
-    const question = byId.get(answer.question);
-    if (!question) throw new Error(`the quiz has no question ${answer.question}; it may have changed while you were taking it`);
-    if (question.answer === null) throw new Error(`question ${answer.question} has no answer marked`);
-    if (!Number.isInteger(answer.chosen) || answer.chosen < 0 || answer.chosen >= question.options.length) throw new Error(`question ${answer.question} has no option ${answer.chosen}`);
-    return { question: { id: question.id, prompt: question.prompt, options: question.options, answer: question.answer, why: question.why, reference: question.reference }, chosen: answer.chosen };
+  const answers: AttemptAnswer[] = input.answers.map((given) => {
+    const question = byId.get(given.question);
+    if (!question) throw new Error(`the quiz has no question ${given.question}; it may have changed while you were taking it`);
+    const problems = questionProblems(question);
+    if (problems.length > 0) throw new Error(`question ${given.question} cannot be asked: ${problems[0]}`);
+    const response = (given.response ?? given.chosen) as Response;
+    const problem = responseProblem(question, response);
+    if (problem) throw new Error(problem);
+    const right = isRight(question, response);
+    let earned: number | null = right ? question.points : 0;
+    const answer: AttemptAnswer = { question: { ...question }, response, earned };
+    if (typeof response === 'number') answer.chosen = response;
+    if (right === null) {
+      if (input.kind === 'practice') {
+        const self = given.self_marked === true;
+        answer.self_marked = self;
+        earned = self ? question.points : 0;
+      } else earned = null;
+      answer.earned = earned;
+    }
+    return answer;
   });
   if (answers.length === 0) throw new Error('an attempt answers at least one question');
   if (input.kind === 'official') {
     const asked = new Set(answers.map((answer) => answer.question.id));
     if (askable(input.quiz).some((question) => !asked.has(question.id))) throw new Error('an official attempt answers the whole quiz');
   }
-  return {
+  const attempt: Attempt = {
     id: input.id,
     quiz: input.quiz.id,
     quiz_title: input.quiz.title,
@@ -641,10 +778,87 @@ export function makeAttempt(input: { id: string; quiz: Quiz; kind: AttemptKind; 
     mode: input.mode,
     by: input.by,
     completed_at: input.completedAt,
-    score: answers.filter((answer) => answer.chosen === answer.question.answer).length,
-    total: answers.length,
+    score: 0,
+    total: 0,
     answers,
   };
+  return withTotals(attempt);
+}
+
+function withTotals(attempt: Attempt): Attempt {
+  attempt.score = attempt.answers.reduce((sum, answer) => sum + (answer.earned ?? 0), 0);
+  attempt.total = attempt.answers.reduce((sum, answer) => sum + answer.question.points, 0);
+  attempt.waiting = attempt.answers.filter((answer) => answer.earned === null).length;
+  return attempt;
+}
+
+// ---- grades ---------------------------------------------------------------------------
+
+export function parseGrade(source: string): Grade {
+  const data = parseYaml(source) as Grade;
+  if (!data || typeof data !== 'object' || !data.id || !data.attempt || !data.question || typeof data.points !== 'number') throw new Error('it is not a grade');
+  return { ...data, note: data.note ?? '', ai: data.ai === true, suggestion: data.suggestion === true };
+}
+
+export function renderGrade(grade: Grade): string {
+  return stringifyYaml(grade, { lineWidth: 0 });
+}
+
+const mark = (grade: Grade): GradeMark => ({ points: grade.points, note: grade.note, by: grade.by, ai: grade.ai, at: grade.at });
+
+// An attempt as its grades leave it: each written answer earns its latest accepted grade, and
+// shows the latest suggestion made after it (Academy REQ63, REQ66, REQ67).
+export function applyGrades(attempt: Attempt, grades: Grade[]): Attempt {
+  const mine = grades.filter((grade) => grade.attempt === attempt.id).sort((a, b) => a.at.localeCompare(b.at));
+  const answers = attempt.answers.map((answer) => {
+    if (answer.question.type !== 'written' || attempt.kind !== 'official') return answer;
+    const forIt = mine.filter((grade) => grade.question === answer.question.id);
+    const accepted = forIt.filter((grade) => !grade.suggestion).at(-1);
+    const suggested = forIt.filter((grade) => grade.suggestion && (!accepted || grade.at > accepted.at)).at(-1);
+    const next: AttemptAnswer = { ...answer, earned: accepted ? Math.min(accepted.points, answer.question.points) : null };
+    if (accepted) next.grade = mark(accepted);
+    else delete next.grade;
+    if (suggested) next.suggestion = mark(suggested);
+    else delete next.suggestion;
+    return next;
+  });
+  return withTotals({ ...attempt, answers });
+}
+
+// An attempt that counts in a best, an average, a comparison, or a course's progress: nothing
+// in it waits for a grade (Academy REQ63).
+export const settled = (attempt: Attempt): boolean => (attempt.waiting ?? 0) === 0;
+
+export interface WaitingAnswer {
+  attempt: string;
+  person: string;
+  question: Question;
+  response: string;
+  completed_at: string;
+  earned: number | null;
+  grade: GradeMark | null;
+  suggestion: GradeMark | null;
+}
+
+// Every written answer of a quiz's official attempts, oldest first: those waiting, and those graded.
+export function writtenAnswers(official: Attempt[]): WaitingAnswer[] {
+  const out: WaitingAnswer[] = [];
+  for (const attempt of [...official].sort((a, b) => a.completed_at.localeCompare(b.completed_at))) {
+    for (const answer of attempt.answers) {
+      if (answer.question.type !== 'written') continue;
+      out.push({
+        attempt: attempt.id,
+        person: attempt.by,
+        question: answer.question,
+        response: typeof answer.response === 'string' ? answer.response : '',
+        completed_at: attempt.completed_at,
+        earned: answer.earned,
+        grade: answer.grade ?? null,
+        suggestion: answer.suggestion ?? null,
+      });
+    }
+  }
+  return out;
 }
 
 // ---- the sums --------------------------------------------------------------------------
@@ -657,7 +871,7 @@ export const percent = (attempt: { score: number; total: number }): number => (a
 export function practiceSets(quiz: Quiz, attempts: Attempt[]): { missed: string[]; unseen: string[] } {
   const latest = new Map<string, boolean>();
   for (const attempt of [...attempts].sort(byTime)) {
-    for (const answer of attempt.answers) latest.set(answer.question.id, answer.chosen === answer.question.answer);
+    for (const answer of attempt.answers) if (answer.earned !== null) latest.set(answer.question.id, answer.earned >= answer.question.points);
   }
   const questions = askable(quiz);
   return {
@@ -674,12 +888,12 @@ export interface MyScores {
   // oldest first
   over_time: Array<{ percent: number; score: number; total: number; completed_at: string }>;
   // newest first, without the questions
-  history: Array<{ id: string; kind: AttemptKind; mode: AttemptMode; score: number; total: number; percent: number; completed_at: string }>;
+  history: Array<{ id: string; kind: AttemptKind; mode: AttemptMode; score: number; total: number; percent: number; completed_at: string; waiting: number }>;
 }
 
 export function myScores(attempts: Attempt[]): MyScores {
   const sorted = [...attempts].sort(byTime);
-  const official = sorted.filter((attempt) => attempt.kind === 'official');
+  const official = sorted.filter((attempt) => attempt.kind === 'official' && settled(attempt));
   const point = (attempt: Attempt) => ({ percent: percent(attempt), score: attempt.score, total: attempt.total, completed_at: attempt.completed_at });
   let best: Attempt | null = null;
   for (const attempt of official) if (!best || percent(attempt) >= percent(best)) best = attempt;
@@ -691,9 +905,16 @@ export function myScores(attempts: Attempt[]): MyScores {
     official_attempts: official.length,
     first_official: official[0]?.completed_at ?? null,
     over_time: official.map(point),
-    history: sorted
-      .reverse()
-      .map((attempt) => ({ id: attempt.id, kind: attempt.kind, mode: attempt.mode, score: attempt.score, total: attempt.total, percent: percent(attempt), completed_at: attempt.completed_at })),
+    history: sorted.reverse().map((attempt) => ({
+      id: attempt.id,
+      kind: attempt.kind,
+      mode: attempt.mode,
+      score: attempt.score,
+      total: attempt.total,
+      percent: percent(attempt),
+      completed_at: attempt.completed_at,
+      waiting: attempt.waiting ?? 0,
+    })),
   };
 }
 
@@ -722,7 +943,8 @@ export interface Comparison {
 }
 
 // Totals only: no name, score, or answer of anyone else leaves this function (Academy REQ20).
-export function compare(official: Attempt[], me: string | null): Comparison {
+export function compare(allOfficial: Attempt[], me: string | null): Comparison {
+  const official = allOfficial.filter(settled);
   const latest = [...latestByPerson(official).entries()];
   const counts = BANDS.map(() => 0);
   let sum = 0;
@@ -750,7 +972,8 @@ export interface PersonResult {
   history: Array<{ id: string; score: number; total: number; percent: number; completed_at: string }>;
 }
 
-export function everyone(official: Attempt[]): PersonResult[] {
+export function everyone(allOfficial: Attempt[]): PersonResult[] {
+  const official = allOfficial.filter(settled);
   const people = new Map<string, Attempt[]>();
   for (const attempt of [...official].sort(byTime)) people.set(attempt.by, [...(people.get(attempt.by) ?? []), attempt]);
   return [...people.entries()]

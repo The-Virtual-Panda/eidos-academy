@@ -19,8 +19,13 @@ import {
   standings,
   courseProgress,
   everyone,
+  applyGrades,
+  blankQuestion,
+  isRight,
   makeAttempt,
   myScores,
+  normalized,
+  questionProblems,
   parseQuestions,
   parseQuiz,
   practiceSets,
@@ -28,6 +33,8 @@ import {
   statusOf,
   type Attempt,
   type Deck,
+  type Grade,
+  type Question,
   type Quiz,
   type Review,
 } from '../src/model.ts';
@@ -42,12 +49,34 @@ const quiz: Quiz = {
   closed: true,
   rank: 2,
   course: null,
+  shuffle_questions: true,
+  shuffle_options: false,
   path: 'academy/a-quiz.md',
   questions: [
-    { id: 'q-one', prompt: 'First line\n\nSecond paragraph', options: ['Right', 'Wrong'], answer: 0, why: 'Because', reference: 'Page 1' },
-    { id: 'q-two', prompt: 'Two', options: ['Wrong', 'Wrong too', 'Right'], answer: 2, why: '', reference: '' },
+    { ...blankQuestion('q-one'), prompt: 'First line\n\nSecond paragraph', options: ['Right', 'Wrong'], answer: 0, correct: [0], why: 'Because', reference: 'Page 1' },
+    { ...blankQuestion('q-two'), prompt: 'Two', options: ['Wrong', 'Wrong too', 'Right'], answer: 2, correct: [2] },
   ],
 };
+
+const q = (id: string, patch: Partial<Question>): Question => ({ ...blankQuestion(id, patch.type ?? 'choice'), prompt: `Question ${id}`, ...patch });
+
+// one of each type, as a quiz holds them
+const every: Question[] = [
+  q('q-tf', { type: 'truefalse', options: ['True', 'False'], correct: [1], answer: 1, why: 'It was where God lived.', context: 'Read section A first.', points: 1 }),
+  q('q-all', { type: 'all', options: ['A', 'B', 'C'], correct: [0, 2], answer: 0, why: 'A and C.', points: 2 }),
+  q('q-short', { type: 'short', accepted: ['Sinai', 'Mount Sinai'], why: 'Exodus 25.', image: 'assets/map.png', reference: 'B-K41#A. The tabernacle' }),
+  q('q-order', { type: 'order', items: ['Genesis', 'Exodus', 'Leviticus'], why: 'The books of Moses.' }),
+  q('q-match', {
+    type: 'match',
+    pairs: [
+      { left: 'mishkan', right: 'Dwelling place' },
+      { left: 'mikdash', right: 'Holy place' },
+    ],
+    why: 'The two names.',
+    points: 2,
+  }),
+  q('q-written', { type: 'written', model: 'God lives among them, and his holiness is kept.', covers: 'Nearness\nHoliness', points: 5, reference: 'https://example.com/lesson' }),
+];
 
 function attempt(by: string, score: number, total: number, at: string, kind: Attempt['kind'] = 'official'): Attempt {
   return { id: `${by}-${at}`, quiz: 'Q-AAAA', quiz_title: 'A quiz', kind, mode: 'whole', by, completed_at: at, score, total, answers: [] };
@@ -61,7 +90,7 @@ test("a quiz's file reads back as it was written", () => {
 test('a quiz is open once it has a question to ask, unless a person closed it', () => {
   const question = quiz.questions[0]!;
   assert.equal(statusOf({ closed: false, questions: [] }), 'closed', 'nothing to ask');
-  assert.equal(statusOf({ closed: false, questions: [{ ...question, answer: null }] }), 'closed', 'a question with no answer cannot be asked');
+  assert.equal(statusOf({ closed: false, questions: [{ ...question, answer: null, correct: [] }] }), 'closed', 'a question with no answer cannot be asked');
   assert.equal(statusOf({ closed: false, questions: [question] }), 'open');
   assert.equal(statusOf({ closed: true, questions: [question] }), 'closed');
 });
@@ -103,7 +132,7 @@ test('an attempt scores against the quiz and keeps a copy of each question', () 
 test('the latest answer decides what is missed, and a question never answered is unseen', () => {
   const answered = (question: string, chosen: number, at: string): Attempt => ({
     ...attempt('ada', 0, 1, at, 'practice'),
-    answers: [{ question: { id: question, prompt: '', options: ['a', 'b'], answer: 0, why: '', reference: '' }, chosen }],
+    answers: [{ question: { ...blankQuestion(question), options: ['a', 'b'], answer: 0, correct: [0] }, chosen, response: chosen, earned: chosen === 0 ? 1 : 0 }],
   });
   assert.deepEqual(practiceSets(quiz, [answered('q-one', 1, '1'), answered('q-one', 0, '2')]), { missed: [], unseen: ['q-two'] });
   assert.deepEqual(practiceSets(quiz, [answered('q-one', 0, '1'), answered('q-one', 1, '2')]), { missed: ['q-one'], unseen: ['q-two'] });
@@ -264,7 +293,18 @@ test("a deck's file reads back as it was written, and is told apart from a quiz'
 });
 
 test('a card is learned after two Got it in a row, and one missed goes back to learning', () => {
-  const reviews = [sitting([['c-one', true], ['c-two', false], ['c-three', true]]), sitting([['c-one', true], ['c-two', true], ['c-three', false]])];
+  const reviews = [
+    sitting([
+      ['c-one', true],
+      ['c-two', false],
+      ['c-three', true],
+    ]),
+    sitting([
+      ['c-one', true],
+      ['c-two', true],
+      ['c-three', false],
+    ]),
+  ];
   const held = standings(deck, reviews);
   assert.deepEqual(
     ['c-one', 'c-two', 'c-three', 'c-four'].map((id) => held.get(id)!.state),
@@ -285,10 +325,32 @@ test('a card is learned after two Got it in a row, and one missed goes back to l
 });
 
 test('a session takes the cards still being learned, then the unseen, then the learned studied longest ago, never by a date to come back', () => {
-  const reviews = [sitting([['c-one', true], ['c-one', true], ['c-two', true], ['c-two', true]]), sitting([['c-three', false]]), sitting([['c-two', true]])];
+  const reviews = [
+    sitting([
+      ['c-one', true],
+      ['c-one', true],
+      ['c-two', true],
+      ['c-two', true],
+    ]),
+    sitting([['c-three', false]]),
+    sitting([['c-two', true]]),
+  ];
   assert.deepEqual(cardsToStudy(deck, reviews, 'next'), ['c-three', 'c-four', 'c-one'], 'learning, then unseen, then the learned card seen longest ago, three a session');
   assert.deepEqual(cardsToStudy(deck, reviews, 'next', 10), ['c-three', 'c-four', 'c-one', 'c-two']);
-  assert.deepEqual(cardsToStudy(deck, [sitting([['c-one', false], ['c-two', true]])], 'missed'), ['c-one'], 'missed: the latest sitting decides');
+  assert.deepEqual(
+    cardsToStudy(
+      deck,
+      [
+        sitting([
+          ['c-one', false],
+          ['c-two', true],
+        ]),
+      ],
+      'missed',
+    ),
+    ['c-one'],
+    'missed: the latest sitting decides',
+  );
   assert.deepEqual(cardsToStudy(deck, [], 'whole'), ['c-one', 'c-two', 'c-three', 'c-four']);
 });
 
@@ -319,4 +381,128 @@ test('a study session keeps a copy of each card, and refuses a card the deck doe
   assert.deepEqual(review.answers[0]!.card, deck.cards[1]);
   assert.throws(() => makeReview({ id: 'r', deck, by: 'ada', mode: 'next', startedAt: '', completedAt: '', answers: [{ card: 'c-gone', got: true }] }), /no card c-gone/);
   assert.throws(() => makeReview({ id: 'r', deck, by: 'ada', mode: 'next', startedAt: '', completedAt: '', answers: [] }), /at least one card/);
+});
+
+test('every question type reads back from its file as it was written', () => {
+  const typed: Quiz = { ...quiz, shuffle_options: true, questions: every };
+  const read = parseQuiz(renderQuiz(typed), typed.path, null);
+  assert.deepEqual(read.questions, every);
+  for (const question of every) assert.deepEqual(questionProblems(question), [], question.id);
+});
+
+test('a quiz written before question types reads as multiple choice, one point each', () => {
+  const [one] = parseQuestions('## q-old\n\nWhat?\n\n- [ ] No\n- [x] Yes\n\n**Why:** Because.\n\n**Reference:** Page 2');
+  assert.equal(one!.type, 'choice');
+  assert.equal(one!.points, 1);
+  assert.equal(one!.answer, 1);
+  assert.deepEqual(one!.correct, [1]);
+});
+
+test('each type tells a right answer from a wrong one', () => {
+  const [tf, all, short, order, match, written] = every as [Question, Question, Question, Question, Question, Question];
+  assert.equal(isRight(tf, 1), true);
+  assert.equal(isRight(tf, 0), false);
+  assert.equal(isRight(all, [0, 2]), true);
+  assert.equal(isRight(all, [0]), false, 'all or nothing');
+  assert.equal(isRight(all, [0, 1, 2]), false);
+  assert.equal(isRight(short, '  mount  SINAI. '), true, 'capitals, spacing, and end punctuation do not matter');
+  assert.equal(isRight(short, 'Horeb'), false);
+  assert.equal(isRight(order, ['Genesis', 'Exodus', 'Leviticus']), true);
+  assert.equal(isRight(order, ['Exodus', 'Genesis', 'Leviticus']), false);
+  assert.equal(isRight(match, ['Dwelling place', 'Holy place']), true);
+  assert.equal(isRight(match, ['Holy place', 'Dwelling place']), false);
+  assert.equal(isRight(written, 'anything'), null);
+  assert.equal(normalized('"Sinai!"'), 'sinai');
+});
+
+test('a question of each type says what it is missing', () => {
+  assert.match(questionProblems(q('a', { type: 'all', options: ['A', 'B'], correct: [] })).join(), /none of its options is marked true/);
+  assert.match(questionProblems(q('b', { type: 'short', accepted: [''] })).join(), /no accepted answer/);
+  assert.match(questionProblems(q('c', { type: 'order', items: ['Only'] })).join(), /1 item/);
+  assert.match(
+    questionProblems(
+      q('d', {
+        type: 'match',
+        pairs: [
+          { left: 'a', right: 'x' },
+          { left: 'b', right: 'X' },
+        ],
+      }),
+    ).join(),
+    /same right side/,
+  );
+  assert.match(questionProblems(q('e', { type: 'written', model: '' })).join(), /no model answer/);
+  assert.match(questionProblems(q('f', { options: ['A', 'B'], correct: [0, 1], answer: 0 })).join(), /more than one option/);
+});
+
+test('an attempt scores points, and an official written answer waits until it is graded', () => {
+  const typed: Quiz = { ...quiz, closed: false, questions: every };
+  const answers = [
+    { question: 'q-tf', response: 1 },
+    { question: 'q-all', response: [0] },
+    { question: 'q-short', response: 'sinai' },
+    { question: 'q-order', response: ['Genesis', 'Exodus', 'Leviticus'] },
+    { question: 'q-match', response: ['Dwelling place', 'Holy place'] },
+    { question: 'q-written', response: 'He lives with them.' },
+  ];
+  const official = makeAttempt({ id: 'a-1', quiz: typed, kind: 'official', mode: 'whole', by: 'ada', completedAt: '2026-11-09T10:00:00Z', answers });
+  assert.equal(official.total, 12);
+  assert.equal(official.score, 5, 'true or false 1, short 1, order 1, match 2; check all wrong; written waiting');
+  assert.equal(official.waiting, 1);
+  assert.deepEqual(myScores([official]).best, null, 'an attempt waiting for a grade counts in no best');
+  assert.equal(compare([official], 'ada').people, 0);
+  const suggestion: Grade = {
+    id: 'g-1',
+    attempt: 'a-1',
+    person: 'ada',
+    quiz: typed.id,
+    question: 'q-written',
+    points: 4,
+    note: 'Close.',
+    by: 'bo',
+    ai: true,
+    suggestion: true,
+    at: '2026-11-09T11:00:00Z',
+  };
+  const suggested = applyGrades(official, [suggestion]);
+  assert.equal(suggested.waiting, 1, 'a suggestion does not count');
+  assert.equal(suggested.answers.at(-1)!.suggestion?.points, 4);
+  const graded = applyGrades(official, [suggestion, { ...suggestion, id: 'g-2', suggestion: false, points: 3, at: '2026-11-09T12:00:00Z' }]);
+  assert.equal(graded.waiting, 0);
+  assert.equal(graded.score, 8);
+  assert.equal(graded.answers.at(-1)!.grade?.points, 3);
+  assert.equal(myScores([graded]).best?.score, 8);
+  const changed = applyGrades(official, [
+    { ...suggestion, id: 'g-2', suggestion: false, points: 3, at: '1' },
+    { ...suggestion, id: 'g-3', suggestion: false, points: 5, at: '2' },
+  ]);
+  assert.equal(changed.score, 10, 'the latest grade counts');
+  const practice = makeAttempt({
+    id: 'a-2',
+    quiz: typed,
+    kind: 'practice',
+    mode: 'whole',
+    by: 'ada',
+    completedAt: 'x',
+    answers: answers.map((answer) => (answer.question === 'q-written' ? { ...answer, self_marked: true } : answer)),
+  });
+  assert.equal(practice.waiting, 0, 'in practice the person marks their own written answer');
+  assert.equal(practice.score, 10);
+  assert.throws(() => makeAttempt({ id: 'a-3', quiz: typed, kind: 'practice', mode: 'whole', by: 'ada', completedAt: 'x', answers: [{ question: 'q-order', response: ['Genesis'] }] }), /in an order/);
+});
+
+test('cards made from every type carry its answer on the back', () => {
+  let n = 0;
+  const cards = cardsFromQuiz({ questions: every }, () => `c-${(n += 1)}`);
+  assert.deepEqual(
+    cards.map((card) => card.back),
+    [
+      'False. It was where God lived.',
+      'A; C. A and C.',
+      'Sinai, Mount Sinai. Exodus 25.',
+      'Genesis, Exodus, Leviticus. The books of Moses.',
+      'mishkan: Dwelling place; mikdash: Holy place. The two names.',
+      'God lives among them, and his holiness is kept',
+    ],
+  );
 });

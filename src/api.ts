@@ -2,6 +2,7 @@
 // who is shown what (Academy REQ23). The files stay readable by anyone with the project.
 import { HostError, type Host } from 'eidosmd/plugin';
 import {
+  accessOf,
   askable,
   cardProblems,
   cardsAcross,
@@ -9,8 +10,6 @@ import {
   cardsToStudy,
   deckProgress,
   makeReview,
-  parseDeck,
-  renderDeck,
   standings,
   studiable,
   STUDY_MODES,
@@ -18,13 +17,17 @@ import {
   canManage,
   canSeeCourse,
   courseProgress,
-  parseQuiz,
-  renderQuiz,
   canSeeResults,
   compare,
   everyone,
   makeAttempt,
   myScores,
+  normalizeQuestion,
+  referenceLink,
+  settled,
+  writtenAnswers,
+  type GivenAnswer,
+  type Grade,
   percent,
   practiceSets,
   questionProblems,
@@ -95,7 +98,8 @@ export function makeApi(host: Host) {
   const bestOf = (quiz: string, alias: string | null, official: Attempt[]): number | null => {
     if (!alias) return null;
     const mine = official.filter((attempt) => attempt.quiz === quiz && attempt.by === alias);
-    return mine.length > 0 ? Math.max(...mine.map(percent)) : null;
+    const counted = mine.filter(settled);
+    return counted.length > 0 ? Math.max(...counted.map(percent)) : null;
   };
 
   const nameOf = (alias: string | null): string | null => (alias === null ? null : (store.people().find((person) => person.alias === alias)?.name ?? alias));
@@ -194,7 +198,8 @@ export function makeApi(host: Host) {
     return { progress, sessions_done: sessions.filter((session) => done[session.id]).length, sessions: sessions.length };
   };
 
-  const validated = (question: Question): Question => {
+  const validated = (given: Question): Question => {
+    const question = normalizeQuestion(given);
     const problems = questionProblems(question);
     if (problems.length > 0) throw new HostError(400, `this question can't be saved yet: ${problems.join('; ')}`);
     return question;
@@ -219,15 +224,13 @@ export function makeApi(host: Host) {
           const left = store.quizzesLeft();
           return left.files.length + left.results.length > 0 ? { folder: left.folder, quizzes: left.files.length, results: left.results.length, may_move: store.access().owner } : null;
         })(),
-        courses: store
-          .list()
-          .courses.map((course) => ({
-            id: course.id,
-            title: course.title,
-            created_by: course.created_by,
-            enrolled: me?.alias ? Boolean(store.enrollmentsOf(me.alias)[course.id]) : false,
-            may_edit: canEdit(course, store.access()),
-          })),
+        courses: store.list().courses.map((course) => ({
+          id: course.id,
+          title: course.title,
+          created_by: course.created_by,
+          enrolled: me?.alias ? Boolean(store.enrollmentsOf(me.alias)[course.id]) : false,
+          may_edit: canEdit(course, store.access()),
+        })),
       };
     },
 
@@ -256,9 +259,20 @@ export function makeApi(host: Host) {
           take_official: store.cannotSign() === null,
           official_why: store.cannotSign(),
         },
+        // written answers waiting for a grade, for those who grade them (Academy REQ65)
+        to_grade: canSeeResults(quiz, store.access()) ? writtenAnswers(store.officialAttempts(quiz.id)).filter((answer) => answer.earned === null).length : null,
         scores: myScores(mine),
         practice: practiceSets(quiz, mine),
         whole_quiz: askable(quiz).map((question) => question.id),
+        // what the questions' references and the quiz's own sources name, so the page links them
+        // and the builder offers the sections of what the quiz draws from first (Academy REQ61)
+        references: store.sectionsOf([
+          ...quiz.draws_from,
+          ...quiz.questions.flatMap((question) => {
+            const link = referenceLink(question.reference);
+            return link?.kind === 'blueprint' ? [link.id] : [];
+          }),
+        ]),
         people: store
           .people()
           .filter((person) => !person.agent && person.alias)
@@ -297,14 +311,14 @@ export function makeApi(host: Host) {
       return found;
     },
 
-    async submit(input: { quiz: string; kind: AttemptKind; mode: AttemptMode; answers: Array<{ question: string; chosen: number }> }) {
+    async submit(input: { quiz: string; kind: AttemptKind; mode: AttemptMode; answers: GivenAnswer[] }) {
       const quiz = store.quiz(input.quiz);
       if (input.kind !== 'official' && input.kind !== 'practice') throw new HostError(400, 'an attempt is official or practice');
       if (input.kind === 'official' && input.mode !== 'whole') throw new HostError(400, 'an official attempt takes the whole quiz');
       // closed, a quiz takes no official attempts, and only those who edit it may try it out
       if (quiz.status === 'closed' && (input.kind === 'official' || !canEdit(quiz, store.access()))) throw new HostError(409, 'this quiz is closed');
       const by = input.kind === 'official' ? store.signer().alias! : store.practiceBy();
-      const earlier = store.officialAttempts(quiz.id).filter((attempt) => attempt.by === by);
+      const earlier = store.officialAttempts(quiz.id).filter((attempt) => attempt.by === by && settled(attempt));
       let attempt: Attempt;
       try {
         attempt = makeAttempt({ id: store.newAttemptId(), quiz, kind: input.kind, mode: input.mode, by, completedAt: new Date().toISOString(), answers: input.answers });
@@ -319,12 +333,72 @@ export function makeApi(host: Host) {
         attempt,
         percent: fraction,
         first: attempt.kind === 'official' && earlier.length === 0,
-        new_best: attempt.kind === 'official' && earlier.length > 0 && fraction > Math.max(...earlier.map(percent)),
+        new_best: attempt.kind === 'official' && settled(attempt) && earlier.length > 0 && fraction > Math.max(...earlier.map(percent)),
+        waiting: attempt.waiting ?? 0,
         change: last ? fraction - percent(last) : null,
         official_attempts: earlier.length + (attempt.kind === 'official' ? 1 : 0),
         average: compare(store.officialAttempts(quiz.id), null).average,
         practice: practiceSets(quiz, mine),
       };
+    },
+
+    // ---- grading written answers (Academy REQ65 to REQ67) ----
+
+    toGrade(id: string) {
+      const quiz = store.quiz(id);
+      if (!canSeeResults(quiz, store.access())) throw new HostError(403, "a quiz's written answers are graded by its creator, its proctors, and the project's owners");
+      const names = new Map(store.people().map((person) => [person.alias, person.name]));
+      const answers = writtenAnswers(store.officialAttempts(quiz.id)).map((answer) => ({ ...answer, name: names.get(answer.person) ?? answer.person }));
+      return { waiting: answers.filter((answer) => answer.earned === null), graded: answers.filter((answer) => answer.earned !== null).reverse() };
+    },
+
+    // An agent grades for the person who asked it, named with `for`, and its grade says AI.
+    async grade(input: { quiz: string; attempt: string; question: string; points: number; note?: string; ai?: boolean; suggestion?: boolean; for?: string }): Promise<Grade> {
+      const quiz = store.quiz(input.quiz);
+      const acting = store.me();
+      let grader: string;
+      let ai = input.ai === true;
+      if (acting?.agent) {
+        const asked = store.people().find((person) => !person.agent && person.alias === input.for);
+        if (!asked) throw new HostError(400, 'an agent grades for the person who asked it: name them with --for <alias>');
+        if (
+          !canSeeResults(
+            quiz,
+            accessOf(
+              asked,
+              store.people().some((person) => person.owner),
+            ),
+          )
+        )
+          throw new HostError(403, `@${asked.alias} does not grade this quiz`);
+        grader = asked.alias!;
+        ai = true;
+      } else {
+        if (!canSeeResults(quiz, store.access())) throw new HostError(403, "a quiz's written answers are graded by its creator, its proctors, and the project's owners");
+        grader = store.signer('Grading').alias!;
+      }
+      const attempt = store.officialAttempts(quiz.id).find((held) => held.id === input.attempt);
+      if (!attempt) throw new HostError(404, `no official attempt ${input.attempt} on this quiz`);
+      const answer = attempt.answers.find((held) => held.question.id === input.question);
+      if (!answer) throw new HostError(404, `attempt ${attempt.id} has no question ${input.question}`);
+      if (answer.question.type !== 'written') throw new HostError(400, 'only a written answer takes a grade; every other answer is scored as it is given');
+      const points = Number(input.points);
+      if (!Number.isInteger(points) || points < 0 || points > answer.question.points) throw new HostError(400, `a grade is a whole number of points from 0 to ${answer.question.points}`);
+      const grade: Grade = {
+        id: store.newGradeId(),
+        attempt: attempt.id,
+        person: attempt.by,
+        quiz: quiz.id,
+        question: answer.question.id,
+        points,
+        note: (input.note ?? '').trim(),
+        by: grader,
+        ai,
+        suggestion: input.suggestion === true,
+        at: new Date().toISOString(),
+      };
+      await store.saveGrade(grade);
+      return grade;
     },
 
     // ---- from the page, under the soft permission ----
@@ -334,7 +408,19 @@ export function makeApi(host: Host) {
       return store.createQuiz({ title: input.title, draws_from: input.draws_from ?? [], course: input.course ?? null, rank: input.place ?? null });
     },
 
-    async updateQuiz(id: string, patch: { title?: string; draws_from?: string[]; proctors?: string[]; created_by?: string | null; course?: string | null; status?: QuizStatus }) {
+    async updateQuiz(
+      id: string,
+      patch: {
+        title?: string;
+        draws_from?: string[];
+        proctors?: string[];
+        created_by?: string | null;
+        course?: string | null;
+        status?: QuizStatus;
+        shuffle_questions?: boolean;
+        shuffle_options?: boolean;
+      },
+    ) {
       let quiz = store.quiz(id);
       requireEdit(quiz, 'a quiz');
       if (patch.status === 'open' && askable(quiz).length === 0) throw new HostError(400, 'add a question before opening this quiz');
@@ -351,6 +437,8 @@ export function makeApi(host: Host) {
         ...(patch.draws_from ? { draws_from: patch.draws_from } : {}),
         ...(patch.proctors ? { proctors: patch.proctors } : {}),
         ...(patch.created_by !== undefined ? { created_by: patch.created_by } : {}),
+        ...(typeof patch.shuffle_questions === 'boolean' ? { shuffle_questions: patch.shuffle_questions } : {}),
+        ...(typeof patch.shuffle_options === 'boolean' ? { shuffle_options: patch.shuffle_options } : {}),
       };
       await store.saveQuiz(next);
       return store.quiz(id);
@@ -359,7 +447,7 @@ export function makeApi(host: Host) {
     async saveQuestion(id: string, question: Question) {
       const quiz = store.quiz(id);
       requireEdit(quiz, 'a quiz');
-      validated(question);
+      question = validated(question);
       const at = quiz.questions.findIndex((held) => held.id === question.id);
       const questions = [...quiz.questions];
       if (at >= 0) questions[at] = question;
@@ -384,26 +472,6 @@ export function makeApi(host: Host) {
     },
 
     // The file as a person edits it in Source, which may reshape anything but what makes it this quiz.
-    quizSource(id: string) {
-      const quiz = store.quiz(id);
-      if (!canEdit(quiz, store.access())) throw new HostError(403, "only a quiz's creator, its proctors, and the project's owners change it");
-      return { text: renderQuiz(quiz) };
-    },
-
-    async saveQuizSource(id: string, text: string) {
-      const quiz = store.quiz(id);
-      requireEdit(quiz, 'a quiz');
-      let read: Quiz;
-      try {
-        read = parseQuiz(text, quiz.path, quiz.course);
-      } catch (cause) {
-        throw new HostError(400, cause instanceof Error ? `this file can't be saved: ${cause.message}` : String(cause));
-      }
-      if (read.id !== quiz.id) throw new HostError(400, `this file's id is ${quiz.id}, and an id is permanent`);
-      await store.saveQuiz(read);
-      return store.quiz(id);
-    },
-
     async removeQuiz(id: string) {
       if (!canManage(store.quiz(id), store.access())) throw new HostError(403, "only a quiz's creator and the project's owners delete it");
       return store.removeQuiz(id);
@@ -580,7 +648,11 @@ export function makeApi(host: Host) {
         course: course ? { id: course.id, title: course.title } : null,
         place: deck.course ? inCourse.findIndex((placed) => placed.item.id === deck.id) + 1 : null,
         of: inCourse.length,
-        made_from: deck.made_from ? (listed.quizzes.find((quiz) => quiz.id === deck.made_from) ? { id: deck.made_from, title: listed.quizzes.find((quiz) => quiz.id === deck.made_from)!.title } : { id: deck.made_from, title: null }) : null,
+        made_from: deck.made_from
+          ? listed.quizzes.find((quiz) => quiz.id === deck.made_from)
+            ? { id: deck.made_from, title: listed.quizzes.find((quiz) => quiz.id === deck.made_from)!.title }
+            : { id: deck.made_from, title: null }
+          : null,
         may: { edit: canEdit(deck, store.access()), manage: canManage(deck, store.access()), study: mayStudy(deck) && studier !== null, shared: studier?.shared ?? false },
         progress: deckProgress(deck, mine),
         missed_last: cardsToStudy(deck, mine, 'missed').length,
@@ -603,7 +675,10 @@ export function makeApi(host: Host) {
         const deck = store.deck(input.deck);
         if (!mayStudy(deck)) throw new HostError(409, 'this deck is closed');
         const byId = new Map(deck.cards.map((card) => [card.id, card]));
-        const held = standings(deck, mine.filter((review) => review.deck === deck.id));
+        const held = standings(
+          deck,
+          mine.filter((review) => review.deck === deck.id),
+        );
         return {
           title: deck.title,
           deck: deck.id,
@@ -615,16 +690,26 @@ export function makeApi(host: Host) {
           ).map((card) => ({ deck: deck.id, deck_title: deck.title, card: byId.get(card)!, state: held.get(card)?.state ?? 'new' })),
         };
       }
-      const decks = store
-        .list()
-        .decks.filter((deck) => deck.status === 'open' && (input.course ? deck.course === input.course : true));
+      const decks = store.list().decks.filter((deck) => deck.status === 'open' && (input.course ? deck.course === input.course : true));
       const picked = cardsAcross(
         decks.map((deck) => ({ deck, reviews: mine.filter((review) => review.deck === deck.id) })),
         20,
       );
-      const byDeck = new Map(decks.map((deck) => [deck.id, { deck, cards: new Map(deck.cards.map((card) => [card.id, card])), held: standings(deck, mine.filter((review) => review.deck === deck.id)) }]));
+      const byDeck = new Map(
+        decks.map((deck) => [
+          deck.id,
+          {
+            deck,
+            cards: new Map(deck.cards.map((card) => [card.id, card])),
+            held: standings(
+              deck,
+              mine.filter((review) => review.deck === deck.id),
+            ),
+          },
+        ]),
+      );
       return {
-        title: input.course ? (store.course(input.course).title) : 'Your decks',
+        title: input.course ? store.course(input.course).title : 'Your decks',
         deck: null,
         mode: 'next' as StudyMode,
         cards: picked.map(({ deck, card }) => {
@@ -683,7 +768,21 @@ export function makeApi(host: Host) {
     keepStudying() {
       const decks = deckRows().filter((row) => row.status === 'open' || row.may_edit);
       const sum = (key: 'learned' | 'learning' | 'unseen' | 'cards'): number => decks.reduce((total, row) => total + row[key], 0);
-      return { decks, learned: sum('learned'), learning: sum('learning'), unseen: sum('unseen'), cards: sum('cards'), may_study: (() => { try { store.studier(); return true; } catch { return false; } })() };
+      return {
+        decks,
+        learned: sum('learned'),
+        learning: sum('learning'),
+        unseen: sum('unseen'),
+        cards: sum('cards'),
+        may_study: (() => {
+          try {
+            store.studier();
+            return true;
+          } catch {
+            return false;
+          }
+        })(),
+      };
     },
 
     async createDeck(input: { title: string; draws_from?: string[]; course?: string | null; place?: number | null; from_quiz?: string | null }) {
@@ -711,7 +810,8 @@ export function makeApi(host: Host) {
       let deck = store.deck(id);
       requireEdit(deck, 'a deck');
       if (patch.status === 'open' && studiable(deck).length === 0) throw new HostError(400, 'add a card before opening this deck');
-      if ((patch.proctors !== undefined || patch.created_by !== undefined) && !canManage(deck, store.access())) throw new HostError(403, "only a deck's creator and the project's owners change who holds it");
+      if ((patch.proctors !== undefined || patch.created_by !== undefined) && !canManage(deck, store.access()))
+        throw new HostError(403, "only a deck's creator and the project's owners change who holds it");
       if (patch.per_session !== undefined && (!Number.isInteger(patch.per_session) || patch.per_session < 1 || patch.per_session > 500)) throw new HostError(400, 'a session takes 1 to 500 cards');
       if (patch.course !== undefined) {
         if (patch.course) requireEdit(store.course(patch.course), 'a course');
@@ -772,26 +872,6 @@ export function makeApi(host: Host) {
       return { deck: store.deck(id), added: made.length };
     },
 
-    deckSource(id: string) {
-      const deck = store.deck(id);
-      if (!canEdit(deck, store.access())) throw new HostError(403, "only a deck's creator, its proctors, and the project's owners change it");
-      return { text: renderDeck(deck) };
-    },
-
-    async saveDeckSource(id: string, text: string) {
-      const deck = store.deck(id);
-      requireEdit(deck, 'a deck');
-      let read: Deck;
-      try {
-        read = parseDeck(text, deck.path, deck.course);
-      } catch (cause) {
-        throw new HostError(400, cause instanceof Error ? `this file can't be saved: ${cause.message}` : String(cause));
-      }
-      if (read.id !== deck.id) throw new HostError(400, `this file's id is ${deck.id}, and an id is permanent`);
-      await store.saveDeck(read);
-      return store.deck(id);
-    },
-
     async removeDeck(id: string) {
       if (!canManage(store.deck(id), store.access())) throw new HostError(403, "only a deck's creator and the project's owners delete it");
       return store.removeDeck(id);
@@ -804,10 +884,7 @@ export function makeApi(host: Host) {
       const moved = store.moveFromQuizzes();
       return {
         ...moved,
-        then: [
-          ...(moved.folder ? [`eidos configure:folder remove ${moved.folder} --yes   # the Quizzes folder's entry, empty now`] : []),
-          'eidos plugin disable quizzes   # Quizzes is Academy now',
-        ],
+        then: [...(moved.folder ? [`eidos configure:folder remove ${moved.folder} --yes   # the Quizzes folder's entry, empty now`] : []), 'eidos plugin disable quizzes   # Quizzes is Academy now'],
       };
     },
 

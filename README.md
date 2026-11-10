@@ -3,14 +3,16 @@
 Build quizzes and flashcard decks on your project's content. Take a quiz to practice or officially for the record, study a deck whenever you like, and follow your progress over time. A plugin for [Eidos MD](https://eidosmd.com) from The Virtual Panda.
 
 - **Get started in a few steps.** A project with nothing in it yet opens on a short tutorial that makes your first quiz, deck, or course.
-- **Build a quiz** from any blueprint, asset, or link. Your own AI agent generates the questions, you regenerate the ones you don't like, or you write them yourself. Each question has its answer and the reason why.
+- **Build a quiz** from any blueprint, asset, or link. Your own AI agent generates the questions, you regenerate the ones you don't like, or you write them yourself. Each question has its answer and the reason why, and can link to the section it comes from.
+- **Seven types of question**: multiple choice, true or false, check all that are true, short answer, put in order, match, and written answer. Give a question more points, a passage or hint to read with it, or an image from your assets. Questions and options are shuffled for each attempt unless you turn it off.
+- **Grade written answers** on a quiz's To grade tab: the person sees the model answer as soon as they submit, and their score is final once a proctor grades it. Grade with AI has your own agent grade every waiting answer, with its grades counting at once or waiting for you to review.
 - **Build a deck of flashcards** the same ways, or make one from a quiz you already have: each question becomes a card, with its answer and why on the back.
 - **Study at your own pace.** Flip a card, answer Got it or Still learning, and a card is learned once you get it twice in a row. Each session brings the cards you are still learning first, then new ones, then the learned ones you studied longest ago. Nothing comes due, and nothing nags you.
 - **Keep studying** shows every deck with how many cards you have learned and when you last studied it, and studies across all of them at once.
 - **Open as soon as it has a question or a card.** You can close a quiz or a deck to keep working on it, trying it out yourself meanwhile.
 - **Group quizzes and decks into courses**, in one order, or keep either as a one-off.
 - **Enroll in a course** to follow your progress across it: which quizzes you have taken and every score. Anyone can enroll, a course's creator and proctors too, and the people who run a course see how everyone enrolled is doing.
-- **Practice locally, then take it officially.** Practice stays on your machine. An official attempt is committed with the project and kept in your history, and so are your sessions with a deck, so your progress follows you to any machine.
+- **Practice locally, then take it officially.** Practice stays on your machine. An official attempt is shared with the project and kept in your history, and so are your sessions with a deck, so your progress follows you to any machine.
 - **See your scores over time**, and how you compare with a quiz's average. A quiz's creator, the proctors they add, and the project's owners see everyone's results, down to each answer. Where you stand in a deck is yours alone.
 - **Add a study plan if you want one.** `/study-plan` has your agent write reading sessions for a book, a textbook, or online content, as ordinary blueprints in your project.
 
@@ -39,13 +41,13 @@ Every quiz, course, result, and enrollment moves over with the same ids. The mov
 
 ## Where things live
 
-| What                                          | Where                                     | Shared?           |
-| --------------------------------------------- | ----------------------------------------- | ----------------- |
-| One-off quizzes and decks                     | `academy/<title>.md`                      | Committed         |
-| A course and its quizzes and decks            | `academy/<course>/`                       | Committed         |
-| Official attempts, deck sessions, enrollments | `.eidos/plugins/academy/results/<alias>/` | Committed         |
-| Practice attempts, sessions with no name      | `.eidos/plugins/academy/local/`           | This machine only |
-| Lessons, wiki pages, study plans              | Your project's own collections            | Yours             |
+| What                                                  | Where                                     | Shared?           |
+| ----------------------------------------------------- | ----------------------------------------- | ----------------- |
+| One-off quizzes and decks                             | `academy/<title>.md`                      | Committed         |
+| A course and its quizzes and decks                    | `academy/<course>/`                       | Committed         |
+| Official attempts, deck sessions, enrollments, grades | `.eidos/plugins/academy/results/<alias>/` | Committed         |
+| Practice attempts, sessions with no name              | `.eidos/plugins/academy/local/`           | This machine only |
+| Lessons, wiki pages, study plans                      | Your project's own collections            | Yours             |
 
 A quiz and a deck are markdown files you can read and edit by hand. `eidos academy --help` lists the commands, and `eidos instructions academy` is the guide your agent follows.
 

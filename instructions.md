@@ -16,18 +16,35 @@ The CLI owns the file; the conversation owns the words.
 ```bash
 eidos academy list [--json]
 eidos academy quiz new "<Title>" --draws-from <blueprint id, asset path, or link> [--course <id>] [--place <n>] [--created-by <alias>] [--closed] [--json]
-eidos academy question add <quiz> --prompt "<text>" --option "<text>" --option "<text>" --answer <n> --why "<text>" [--reference "<text>"] [--json]
-eidos academy question set <quiz> <question> [--prompt ...] [--option ...] [--answer <n>] [--why ...] [--reference ...] [--regenerated] [--json]
+eidos academy question add <quiz> [--type <type>] --prompt "<text>" <its answer> --why "<text>" [--context "<text>"] [--image <asset>] [--points <n>] [--reference <ref>] [--json]
+eidos academy question set <quiz> <question> [--type ...] [--prompt ...] [<its answer>] [--why ...] [--context ...] [--image ...] [--points <n>] [--reference ...] [--regenerated] [--json]
 eidos academy question remove <quiz> <question>
 eidos academy quiz show <quiz> [--json]
-eidos academy quiz set <quiz> [--title ...] [--add-source ...] [--remove-source ...] [--course <id>|""] [--place <n>] [--created-by <alias>] [--add-proctor <alias>] [--remove-proctor <alias>]
+eidos academy quiz set <quiz> [--title ...] [--add-source ...] [--remove-source ...] [--course <id>|""] [--place <n>] [--created-by <alias>] [--add-proctor <alias>] [--remove-proctor <alias>] [--shuffle-questions on|off] [--shuffle-options on|off]
 ```
+
+A question is one of seven types, each with its own answer:
+
+| `--type`                    | Its answer                                                                               |
+| --------------------------- | ---------------------------------------------------------------------------------------- |
+| `multiple-choice` (default) | `--option` two to five times, `--answer <n>` for the one right option                    |
+| `true-or-false`             | `--answer True` or `--answer False`                                                      |
+| `check-all`                 | `--option` two to eight times, `--answer <n>` for each true one                          |
+| `short-answer`              | `--accept "<text>"` for each accepted answer                                             |
+| `put-in-order`              | `--item "<text>"` two to eight times, in their right order                               |
+| `match`                     | `--pair "<left> -> <right>"` two to eight times                                          |
+| `written-answer`            | `--model "<text>"`, the model answer, and `--covers "<text>"`, what a full answer covers |
+
+`--answer` is an option's number, from 1. Every type but a written answer takes `--why`. `--points` is 1 unless set: give more only to a question worth more, a written answer most often. `--context` is shown under the prompt while it is answered (a passage, a hint, or more about what it asks). `--reference` links to where the answer comes from: a blueprint id, with `#<section heading>` or not, an asset path, or a link.
 
 When you generate questions:
 
 - Read the content the quiz draws from, all of it, and base every question strictly on it. Where it misspeaks (a garbled number or reference), follow what the author clearly meant.
-- A question has two to five options, four unless it is true or false, and exactly one is right. `--answer` is the right option's number, from 1.
+- Use multiple choice unless the person asks for other types. A multiple-choice question has four options unless it has a reason for fewer.
 - Vary the position of the right answer. Make wrong options plausible, and keep every option parallel in length, detail, and format, so the right one is never the longest, the most specific, or the only one with exact references.
+- A short answer accepts every way of writing the one answer (a name with and without its title, a common spelling); capitals, spacing, and end punctuation never matter.
+- Check all that are true, put in order, and match count only when all of it is right, so keep them to what the content states plainly.
+- A written answer's model answer is a full answer in a few sentences, and what a full answer covers is the points a grader looks for, one a line.
 - Mix recall (facts, outlines, references) with understanding (why something matters).
 - Always give `--why`: it is shown the moment a person answers.
 - Replacing a question with a different one, use `question set --regenerated`: it takes a new id and counts as not yet seen. Past attempts keep their copy of the old one.
@@ -97,6 +114,17 @@ A finished session is recorded per person with `eidos academy session done <blue
 ### Results
 
 `eidos academy quiz results <quiz> [--json]` shows what the page would show the person acting: their own attempts and the quiz's totals, or everyone's for the quiz's creator, its proctors, and the project's owners. With no user selected, or in a project with no owner marked, everyone counts as an owner, and a quiz, deck, or course whose creator is unknown is anyone's to manage. That is a soft permission. It decides what is drawn, and the files stay readable, so never call results private. Only people take quizzes: an agent has no attempts and no scores, so never write an attempt. A deck has no results at all: where a person stands in it is theirs alone.
+
+### Grading written answers
+
+A written answer in an official attempt waits for a grade, and the attempt counts in no best, average, or comparison until every one is graded. The quiz's creator, its proctors, and the project's owners grade them, on the quiz's To grade tab or with:
+
+```bash
+eidos academy grade list <quiz> [--json]
+eidos academy grade add <quiz> <attempt> <question> --points <n> [--note "<text>"] [--ai] [--suggestion] [--for <alias>] [--json]
+```
+
+You grade only when a person who grades the quiz asks you to, and for them: pass `--for <their alias>` and `--ai`, and `--suggestion` unless they asked for your grades to count without review. Grade each answer against its question's model answer and what a full answer covers, out of its points, on what the person wrote alone, and leave a short, kind note saying what a full answer has that theirs does not. The latest grade counts, and the grader can change any. In practice, a person marks their own written answer, so never grade a practice attempt.
 
 ### From Quizzes
 

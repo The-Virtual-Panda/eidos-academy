@@ -9,17 +9,21 @@ import { HostError, type Host } from 'eidosmd/plugin';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import {
   accessOf,
+  applyGrades,
+  blankQuestion,
   CARDS_A_SESSION,
   drawId,
   isDeckSource,
   parseAttempt,
   parseCourse,
+  parseGrade,
   parseDeck,
   parseQuiz,
   parseReview,
   renderAttempt,
   renderCourse,
   renderDeck,
+  renderGrade,
   renderQuiz,
   renderReview,
   slugify,
@@ -27,6 +31,7 @@ import {
   type Card,
   type Course,
   type Deck,
+  type Grade,
   type Person,
   type Question,
   type Quiz,
@@ -37,6 +42,7 @@ export const COURSE_FILE = 'course.md';
 const ENROLLMENTS_FILE = 'enrollments.yaml';
 // a person's study sessions, one file each, beside their attempts
 const REVIEWS_FOLDER = 'reviews';
+const GRADES_FOLDER = 'grades';
 // what the Quizzes plugin, Academy's name before 0.3.0, kept its files under
 export const QUIZZES_OWNER = '@quizzes/quizzes';
 const QUIZZES_WORKSPACE = '.eidos/plugins/quizzes';
@@ -225,7 +231,7 @@ export class Store {
   }
 
   // Why this person can't sign an official attempt or an enrollment, or null when they can.
-  cannotSign(what: 'An official attempt' | 'Enrolling' = 'An official attempt'): string | null {
+  cannotSign(what: 'An official attempt' | 'Enrolling' | 'Grading' = 'An official attempt'): string | null {
     const me = this.me();
     if (me?.agent) return what === 'Enrolling' ? 'Only people enroll in a course' : 'Only people take quizzes';
     if (me?.alias || this.gitIdentity()) return null;
@@ -234,7 +240,7 @@ export class Store {
 
   // Who signs an official attempt or an enrollment: the person acting, added to the project's
   // users the first time they need to be (Academy REQ18).
-  signer(what: 'An official attempt' | 'Enrolling' = 'An official attempt'): ProjectPerson {
+  signer(what: 'An official attempt' | 'Enrolling' | 'Grading' = 'An official attempt'): ProjectPerson {
     const me = this.me();
     if (me) {
       if (me.agent) throw new HostError(403, what === 'Enrolling' ? 'only people enroll in a course, so an agent has no progress' : 'only people take quizzes, so an agent has no official attempts');
@@ -285,7 +291,10 @@ export class Store {
     const listed = this.list();
     const course = input.course ?? null;
     const quiz: Quiz = {
-      id: drawId('Q-', [...listed.quizzes, ...listed.decks].map((held) => held.id)),
+      id: drawId(
+        'Q-',
+        [...listed.quizzes, ...listed.decks].map((held) => held.id),
+      ),
       title,
       draws_from: input.draws_from ?? [],
       created_by: input.created_by === undefined ? (this.me()?.alias ?? null) : input.created_by,
@@ -295,6 +304,8 @@ export class Store {
       closed: input.closed ?? false,
       rank: this.nextRank(course),
       course,
+      shuffle_questions: true,
+      shuffle_options: true,
       questions: [],
       path: this.freePath(this.courseFolder(course), title),
     };
@@ -396,13 +407,25 @@ export class Store {
     await this.host.writeFile(deck.path, renderDeck(deck));
   }
 
-  async createDeck(input: { closed?: boolean; title: string; draws_from?: string[]; course?: string | null; created_by?: string | null; rank?: number | null; made_from?: string | null; cards?: Card[] }): Promise<Deck> {
+  async createDeck(input: {
+    closed?: boolean;
+    title: string;
+    draws_from?: string[];
+    course?: string | null;
+    created_by?: string | null;
+    rank?: number | null;
+    made_from?: string | null;
+    cards?: Card[];
+  }): Promise<Deck> {
     const title = input.title.trim();
     if (!title) throw new HostError(400, 'a deck needs a title');
     const listed = this.list();
     const course = input.course ?? null;
     const deck: Deck = {
-      id: drawId('F-', [...listed.quizzes, ...listed.decks].map((held) => held.id)),
+      id: drawId(
+        'F-',
+        [...listed.quizzes, ...listed.decks].map((held) => held.id),
+      ),
       title,
       draws_from: input.draws_from ?? [],
       made_from: input.made_from ?? null,
@@ -454,8 +477,8 @@ export class Store {
     ).toLowerCase();
   }
 
-  blankQuestion(quiz: Quiz): Question {
-    return { id: this.newQuestionId(quiz), prompt: '', options: ['', ''], answer: null, why: '', reference: '' };
+  blankQuestion(quiz: Quiz, type: Question['type'] = 'choice'): Question {
+    return blankQuestion(this.newQuestionId(quiz), type);
   }
 
   // ---- attempts --------------------------------------------------------------------
@@ -477,10 +500,46 @@ export class Store {
     return attempts;
   }
 
-  // official attempts, everyone's
+  // official attempts, everyone's, with every grade given to their written answers
   officialAttempts(quiz?: string): Attempt[] {
-    const attempts = this.attemptsIn(path.join(this.host.workspace, 'results'));
-    return quiz ? attempts.filter((attempt) => attempt.quiz === quiz) : attempts;
+    const all = this.attemptsIn(path.join(this.host.workspace, 'results'));
+    const attempts = quiz ? all.filter((attempt) => attempt.quiz === quiz) : all;
+    if (!attempts.some((attempt) => attempt.answers.some((answer) => answer.question.type === 'written'))) return attempts;
+    const grades = this.grades(quiz);
+    return attempts.map((attempt) => applyGrades(attempt, grades));
+  }
+
+  // ---- grades of written answers (Academy REQ66) -----------------------------------------
+
+  grades(quiz?: string): Grade[] {
+    const grades: Grade[] = [];
+    const results = path.join(this.host.workspace, 'results');
+    for (const person of listDir(results)) {
+      const folder = path.join(results, person, GRADES_FOLDER);
+      if (!existsSync(folder) || !statSync(folder).isDirectory()) continue;
+      for (const name of listDir(folder)) {
+        if (!name.endsWith('.yaml')) continue;
+        try {
+          const grade = parseGrade(readFileSync(path.join(folder, name), 'utf8'));
+          if (!quiz || grade.quiz === quiz) grades.push(grade);
+        } catch {
+          // a file that does not read is left out, as an attempt is
+        }
+      }
+    }
+    return grades;
+  }
+
+  newGradeId(): string {
+    const stamp = new Date()
+      .toISOString()
+      .replace(/[-:.TZ]/g, '')
+      .slice(0, 14);
+    return drawId(`g-${stamp}-`).toLowerCase();
+  }
+
+  async saveGrade(grade: Grade): Promise<void> {
+    await this.host.writeFile(`${this.workspaceRel}/results/${grade.by}/${GRADES_FOLDER}/${grade.id}.yaml`, renderGrade(grade));
   }
 
   // practice attempts, this machine's
@@ -678,6 +737,24 @@ export class Store {
   }
 
   // The blueprints a course's link names: one by id, or a collection's or a category's.
+  // Blueprints by id, with the headings of their sections, for a question's reference (Academy REQ61).
+  sectionsOf(ids: string[]): Array<{ id: string; title: string; rel: string; sections: string[] }> {
+    const wanted = new Set(ids);
+    const found: Array<{ id: string; title: string; rel: string; sections: string[] }> = [];
+    for (const blueprint of this.host.context().blueprints) {
+      const id = blueprint.properties?.['id'];
+      if (typeof id !== 'string' || !wanted.has(id)) continue;
+      const title = blueprint.properties?.['title'];
+      found.push({
+        id,
+        title: typeof title === 'string' ? title : id,
+        rel: blueprint.rel,
+        sections: blueprint.headings.filter((heading) => heading.level >= 2 && heading.level <= 3).map((heading) => heading.text.trim()),
+      });
+    }
+    return found;
+  }
+
   blueprintsOf(links: string[]): Array<{ id: string; title: string; rel: string }> {
     const found = new Map<string, { id: string; title: string; rel: string }>();
     for (const blueprint of this.host.context().blueprints) {

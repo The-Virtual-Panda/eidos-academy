@@ -21,9 +21,6 @@ const entry: AppEntry<Api> = {
     host.route('PUT', 'quiz', (request) => api.updateQuiz(need(request, 'id'), request.body as Parameters<Api['updateQuiz']>[1]));
     host.route('DELETE', 'quiz', (request) => api.removeQuiz(need(request, 'id')));
 
-    host.route('GET', 'source', (request) => api.quizSource(need(request, 'id')));
-    host.route('PUT', 'source', (request) => api.saveQuizSource(need(request, 'id'), request.body['text'] as string));
-
     host.route('PUT', 'question', (request) => api.saveQuestion(need(request, 'id'), request.body['question'] as Question));
     host.route('POST', 'question/blank', (request) => api.store.blankQuestion(api.store.quiz(need(request, 'id'))));
     host.route('DELETE', 'question', (request) => api.removeQuestion(need(request, 'id'), need(request, 'question')));
@@ -32,7 +29,9 @@ const entry: AppEntry<Api> = {
     host.route('GET', 'compare', (request) => api.compare(need(request, 'id')));
     host.route('GET', 'results', (request) => api.results(need(request, 'id')));
     host.route('GET', 'attempt', (request) => api.attempt(need(request, 'id'), need(request, 'attempt')));
-    host.route('POST', 'attempt', (request) => api.submit(request.body as { quiz: string; kind: AttemptKind; mode: AttemptMode; answers: Array<{ question: string; chosen: number }> }));
+    host.route('POST', 'attempt', (request) => api.submit(request.body as Parameters<Api['submit']>[0]));
+    host.route('GET', 'to-grade', (request) => api.toGrade(need(request, 'id')));
+    host.route('POST', 'grade', (request) => api.grade(request.body as Parameters<Api['grade']>[0]));
 
     host.route('GET', 'course', (request) => api.course(need(request, 'id')));
     host.route('POST', 'course', (request) => api.createCourse(request.body as { title: string; description?: string }));
@@ -48,8 +47,6 @@ const entry: AppEntry<Api> = {
     host.route('POST', 'deck', (request) => api.createDeck(request.body as Parameters<Api['createDeck']>[0]));
     host.route('PUT', 'deck', (request) => api.updateDeck(need(request, 'id'), request.body as Parameters<Api['updateDeck']>[1]));
     host.route('DELETE', 'deck', (request) => api.removeDeck(need(request, 'id')));
-    host.route('GET', 'deck/source', (request) => api.deckSource(need(request, 'id')));
-    host.route('PUT', 'deck/source', (request) => api.saveDeckSource(need(request, 'id'), request.body['text'] as string));
     host.route('PUT', 'card', (request) => api.saveCard(need(request, 'id'), request.body['card'] as Card));
     host.route('POST', 'card/blank', (request) => api.store.blankCard(api.store.deck(need(request, 'id'))));
     host.route('DELETE', 'card', (request) => api.removeCard(need(request, 'id'), need(request, 'card')));

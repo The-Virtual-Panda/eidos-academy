@@ -369,7 +369,10 @@ test('a deck is written from the shell as a page a person can read, and a card w
   assert.match(refused.stderr, /it has no back/);
 
   const listed = await json<{ quizzes: unknown[]; decks: Array<{ id: string }> }>('academy', 'list');
-  assert.ok(listed.decks.some((row) => row.id === deck.id), 'the list holds decks beside quizzes');
+  assert.ok(
+    listed.decks.some((row) => row.id === deck.id),
+    'the list holds decks beside quizzes',
+  );
   const check = await sandbox.run(['check']);
   assert.match(check.stdout + check.stderr, /this deck draws from B-NOPE, which is gone/);
 });
@@ -426,8 +429,21 @@ test('studying a deck keeps each session with the project, and a card is learned
     'still learning first, then the card never seen',
   );
 
-  await sandbox.route('POST', 'study', { body: { mode: 'next', started_at: new Date().toISOString(), answers: [{ deck: deck.id, card: one.id, got: true }, { deck: deck.id, card: three.id, got: false }] } });
-  const view = await sandbox.route<{ progress: { learned: number; learning: number; new: number; last_studied: string | null; history: unknown[] }; missed_last: number; standings: Record<string, { state: string; last_seen: string | null }> }>('GET', 'deck', {
+  await sandbox.route('POST', 'study', {
+    body: {
+      mode: 'next',
+      started_at: new Date().toISOString(),
+      answers: [
+        { deck: deck.id, card: one.id, got: true },
+        { deck: deck.id, card: three.id, got: false },
+      ],
+    },
+  });
+  const view = await sandbox.route<{
+    progress: { learned: number; learning: number; new: number; last_studied: string | null; history: unknown[] };
+    missed_last: number;
+    standings: Record<string, { state: string; last_seen: string | null }>;
+  }>('GET', 'deck', {
     query: { id: deck.id },
   });
   assert.deepEqual([view.progress.learned, view.progress.learning, view.progress.new], [1, 2, 0]);
@@ -459,7 +475,7 @@ test('only people study: an agent has no study sessions', async () => {
   }
 });
 
-test("a course holds quizzes and decks in one order, and Keep studying lists every deck with where the person stands", async () => {
+test('a course holds quizzes and decks in one order, and Keep studying lists every deck with where the person stands', async () => {
   const course = await json<{ id: string }>('academy', 'course', 'new', 'Mixed course');
   const quiz = await json<Quiz>('academy', 'quiz', 'new', 'Mixed quiz', '--course', course.id);
   const deck = await json<DeckFile>('academy', 'deck', 'new', 'Mixed deck', '--course', course.id);
@@ -494,7 +510,10 @@ test('move-quizzes brings what the Quizzes plugin left into Academy, keeping eve
   writeFileSync(path.join(old, 'legacy.md'), '---\nid: Q-OLD1\ntitle: Legacy quiz\n---\n\n## q-one\n\nAsked?\n\n- [x] Yes\n- [ ] No\n');
   const results = path.join(sandbox.root, '.eidos/plugins/quizzes/results/bo');
   mkdirSync(results, { recursive: true });
-  writeFileSync(path.join(results, 'a-old.yaml'), stringify({ id: 'a-old', quiz: 'Q-OLD1', quiz_title: 'Legacy quiz', kind: 'official', mode: 'whole', by: 'bo', completed_at: '2026-11-01T00:00:00Z', score: 1, total: 1, answers: [] }));
+  writeFileSync(
+    path.join(results, 'a-old.yaml'),
+    stringify({ id: 'a-old', quiz: 'Q-OLD1', quiz_title: 'Legacy quiz', kind: 'official', mode: 'whole', by: 'bo', completed_at: '2026-11-01T00:00:00Z', score: 1, total: 1, answers: [] }),
+  );
 
   const check = await sandbox.run(['check']);
   assert.match(check.stdout + check.stderr, /eidos academy move-quizzes brings them into Academy/);
@@ -512,4 +531,81 @@ test('move-quizzes brings what the Quizzes plugin left into Academy, keeping eve
   assert.ok(existsSync(path.join(sandbox.root, '.eidos/plugins/academy/results/bo/a-old.yaml')));
   const after = await json<{ quizzes_left: unknown }>('academy', 'list');
   assert.equal(after.quizzes_left, null);
+});
+
+test('every question type is written from the shell, and a written answer waits for a grade the agent can suggest', async () => {
+  const as = async <T>(user: string, ...args: string[]): Promise<{ status: number; stderr: string; value: T | null }> => {
+    const run = await sandbox.run([...args, '--json'], { env: { EIDOS_USER: user } });
+    return { status: run.status ?? 1, stderr: run.stderr, value: run.status === 0 ? (JSON.parse(run.stdout) as T) : null };
+  };
+  const quiz = await json<Quiz>('academy', 'quiz', 'new', 'Every type', '--closed');
+  const add = (...args: string[]) => json<{ id: string; type: string; points: number }>('academy', 'question', 'add', quiz.id, ...args);
+  const tf = await add('--type', 'true-or-false', '--prompt', 'It was a meeting tent.', '--answer', 'False', '--why', 'It was a dwelling.');
+  const all = await add('--type', 'check-all', '--prompt', 'Which are true?', '--option', 'A', '--option', 'B', '--option', 'C', '--answer', '1', '--answer', '3', '--why', 'A and C.');
+  const short = await add('--type', 'short-answer', '--prompt', 'Which mountain?', '--accept', 'Sinai', '--accept', 'Mount Sinai', '--why', 'Exodus 25.', '--context', 'Exodus 25 to 31.');
+  const order = await add('--type', 'put-in-order', '--prompt', 'In order', '--item', 'Genesis', '--item', 'Exodus', '--why', 'Moses.');
+  const match = await add('--type', 'match', '--prompt', 'Match', '--pair', 'mishkan -> Dwelling place', '--pair', 'mikdash -> Holy place', '--why', 'Names.');
+  const written = await add('--type', 'written-answer', '--prompt', 'Explain it', '--model', 'Near and holy.', '--covers', 'Nearness; holiness', '--points', '5');
+  assert.equal(written.points, 5);
+  assert.equal(tf.type, 'truefalse');
+  await json('academy', 'quiz', 'set', quiz.id, '--status', 'open', '--shuffle-options', 'off');
+  const text = readFileSync(path.join(sandbox.root, quiz.path), 'utf8');
+  assert.match(text, /\*\*Type:\*\* put in order/);
+  assert.match(text, /- mishkan → Dwelling place/);
+  assert.match(text, /\*\*Model answer:\*\* Near and holy\./);
+  assert.match(text, /shuffle_options: false/);
+
+  const answers = [
+    { question: tf.id, response: 1 },
+    { question: all.id, response: [0, 2] },
+    { question: short.id, response: 'mount sinai' },
+    { question: order.id, response: ['Genesis', 'Exodus'] },
+    { question: match.id, response: ['Dwelling place', 'Holy place'] },
+    { question: written.id, response: 'God is near, and holy.' },
+  ];
+  const taken = await sandbox.route<{ attempt: { id: string; score: number; total: number }; waiting: number }>('POST', 'attempt', {
+    body: { quiz: quiz.id, kind: 'official', mode: 'whole', answers },
+  });
+  assert.equal(taken.waiting, 1);
+  assert.equal(taken.attempt.score, 5);
+  assert.equal(taken.attempt.total, 10);
+
+  // bo neither created it nor proctors it, so does not grade it; the owner does
+  assert.match((await as('bo', 'academy', 'grade', 'list', quiz.id)).stderr, /graded by its creator/);
+  const listed = await as<{ waiting: Array<{ attempt: string; question: { id: string } }> }>('own', 'academy', 'grade', 'list', quiz.id);
+  assert.equal(listed.value!.waiting.length, 1);
+
+  // an agent grades for the person who asked it, as a suggestion
+  const refused = await as('agent', 'academy', 'grade', 'add', quiz.id, taken.attempt.id, written.id, '--points', '4');
+  assert.match(refused.stderr, /--for/);
+  const suggested = await as<{ ai: boolean; by: string; suggestion: boolean }>(
+    'agent',
+    'academy',
+    'grade',
+    'add',
+    quiz.id,
+    taken.attempt.id,
+    written.id,
+    '--points',
+    '4',
+    '--note',
+    'Close.',
+    '--suggestion',
+    '--for',
+    'own',
+  );
+  assert.equal(suggested.value!.by, 'own');
+  assert.equal(suggested.value!.ai, true);
+  const still = await as<{ waiting: unknown[] }>('own', 'academy', 'grade', 'list', quiz.id);
+  assert.equal(still.value!.waiting.length, 1, 'a suggestion does not count');
+
+  const tooMany = await as('own', 'academy', 'grade', 'add', quiz.id, taken.attempt.id, written.id, '--points', '6');
+  assert.match(tooMany.stderr, /0 to 5/);
+  await as('own', 'academy', 'grade', 'add', quiz.id, taken.attempt.id, written.id, '--points', '3', '--note', 'Name both.');
+  const done = await as<{ waiting: unknown[]; graded: Array<{ earned: number; grade: { by: string } }> }>('own', 'academy', 'grade', 'list', quiz.id);
+  assert.equal(done.value!.waiting.length, 0);
+  assert.equal(done.value!.graded[0]!.earned, 3);
+  assert.ok(existsSync(path.join(sandbox.root, '.eidos/plugins/academy/results/own/grades')), "a grade is kept in the grader's own folder");
+  const mine = await sandbox.route<{ attempt: { score: number; waiting: number } }>('GET', 'attempt', { query: { id: quiz.id, attempt: taken.attempt.id } }).catch(() => null);
+  if (mine) assert.equal((mine as unknown as { score: number }).score, 8);
 });
