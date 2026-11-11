@@ -33,7 +33,7 @@ import {
   type PluginHost,
 } from 'eidosmd/page';
 import { asPercent, ContextMenu, Delta, Failed, formatDate, HelpMark, LaptopMark, Loading, Stat, Surface, useAct, useData, UserPill, useTrail, type MenuEntry } from './page-kit.tsx';
-import type { Attempt, AttemptKind, AttemptMode, Card, Comparison, Course, CourseProgress, Deck, DeckProgress, GradeMark, MyScores, PersonResult, Quiz, StudyMode } from './model.ts';
+import type { Attempt, AttemptKind, GuestName, AttemptMode, Card, Comparison, Course, CourseProgress, Deck, DeckProgress, GradeMark, MyScores, PersonResult, Quiz, StudyMode } from './model.ts';
 import { answerText, blankQuestion, isRight, QUESTION_TYPE_NAMES, QUESTION_TYPES, referenceLink, responseText, type Question, type QuestionType, type Response } from './question.ts';
 
 // ---- what the routes answer ------------------------------------------------------------
@@ -96,6 +96,8 @@ interface QuizView {
   whole_quiz: string[];
   references: Array<{ id: string; title: string; rel: string; sections: string[] }>;
   to_grade: number | null;
+  // guests' attempts from the quiz's public links; null to anyone who may not see them (Academy REQ72)
+  guests: number | null;
   people: Array<{ alias: string; name: string }>;
 }
 interface Pickable {
@@ -2284,6 +2286,12 @@ function CompareTab({ id }: { id: string }): JSX.Element {
   );
 }
 
+const GUEST_NAME_CHOICES: Array<[GuestName, string]> = [
+  ['required', 'Required'],
+  ['optional', 'Optional'],
+  ['none', 'Not asked'],
+];
+
 function ResultsTab({ view }: { view: QuizView }): JSX.Element {
   const { data, error } = useData<ResultsView>(`results?id=${Q(view.quiz.id)}`);
   const [search, setSearch] = useState('');
@@ -2350,6 +2358,116 @@ function ResultsTab({ view }: { view: QuizView }): JSX.Element {
             </Select>
           )}
           <PersonAttempt quiz={view.quiz.id} attempt={open.attempt} />
+        </Modal>
+      )}
+    </>
+  );
+}
+
+// Guests' attempts from the quiz's public links (Academy REQ72, REQ73): apart from the project's people, newest first, live as
+// they arrive. A guest's name is their own words, drawn as text.
+interface GuestsView {
+  attempts: Array<{ id: string; name: string | null; link: string; completed_at: string; score: number; total: number; waiting: number }>;
+}
+
+const shortLink = (link: string): string => `Link ${link.slice(0, 4)}…${link.slice(-4)}`;
+
+function GuestsTab({ view }: { view: QuizView }): JSX.Element {
+  const host = usePluginHost();
+  const act = useAct();
+  const { data, error, reload } = useData<GuestsView>(`guests?id=${Q(view.quiz.id)}`);
+  const [link, setLink] = useState('');
+  const [open, setOpen] = useState<GuestsView['attempts'][number] | null>(null);
+  if (error) return <Notice tone="error">{error}</Notice>;
+  if (!data) return <Loading />;
+  const links = [...new Set(data.attempts.map((attempt) => attempt.link))];
+  const rows = data.attempts.filter((attempt) => link === '' || attempt.link === link);
+  const nameOf = (attempt: GuestsView['attempts'][number]): string => attempt.name ?? 'No name given';
+  const remove = async (attempt: GuestsView['attempts'][number]): Promise<void> => {
+    if (!(await host.dialog.confirm(`Remove ${attempt.name ?? 'this guest'}'s attempt? It can't be brought back.`, { title: "Remove a guest's attempt", ok: 'Remove', danger: true }))) return;
+    await act('Could not remove the attempt', async () => {
+      await host.del(`guests?id=${Q(view.quiz.id)}&attempt=${Q(attempt.id)}`);
+      setOpen(null);
+      reload();
+    });
+  };
+  const removeLink = async (): Promise<void> => {
+    const count = rows.length;
+    if (
+      !(await host.dialog.confirm(`Remove all ${count} ${count === 1 ? 'attempt' : 'attempts'} from ${shortLink(link)}? They can't be brought back.`, {
+        title: "Remove a link's attempts",
+        ok: 'Remove all',
+        danger: true,
+      }))
+    )
+      return;
+    await act('Could not remove the attempts', async () => {
+      await host.del(`guests?id=${Q(view.quiz.id)}&link=${Q(link)}`);
+      setLink('');
+      reload();
+    });
+  };
+  const scoreOf = (attempt: GuestsView['attempts'][number]): string =>
+    attempt.waiting > 0
+      ? `${attempt.score} of ${attempt.total} · ${attempt.waiting} to grade`
+      : `${attempt.score} of ${attempt.total} · ${asPercent(attempt.total === 0 ? 0 : attempt.score / attempt.total)}`;
+  return (
+    <>
+      <Row justify="between" wrap gap="sm">
+        <Text tone="muted">From public links, apart from the project's people. They count in no score here.</Text>
+        {links.length > 1 && (
+          <Select filter aria-label="Link" value={link} onChange={(event: { target: HTMLSelectElement }) => setLink(event.target.value)}>
+            <option value="">All links</option>
+            {links.map((each) => (
+              <option key={each} value={each}>
+                {shortLink(each)}
+              </option>
+            ))}
+          </Select>
+        )}
+      </Row>
+      <div className="qz-scroll" style={{ marginTop: 10 }}>
+        <table className="qz-table">
+          <thead>
+            <tr>
+              <th>Guest</th>
+              <th>Score</th>
+              <th>Link</th>
+              <th>Arrived</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((attempt) => (
+              <tr key={attempt.id}>
+                <td>
+                  <button className="qz-rowlink" onClick={() => setOpen(attempt)}>
+                    {attempt.name ?? <span className="qz-muted">No name given</span>}
+                  </button>
+                </td>
+                <td>{scoreOf(attempt)}</td>
+                <td className="qz-muted">{shortLink(attempt.link)}</td>
+                <td>{formatDate(attempt.completed_at)}</td>
+                <td className="num">
+                  <Button size="sm" variant="quiet" onClick={() => void remove(attempt)}>
+                    Remove
+                  </Button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {link !== '' && (
+        <Row justify="end" style={{ marginTop: 10 }}>
+          <Button size="sm" variant="danger-fill" onClick={() => void removeLink()}>
+            Remove all from this link
+          </Button>
+        </Row>
+      )}
+      {open && (
+        <Modal title={nameOf(open)} size="lg" onClose={() => setOpen(null)}>
+          <PersonAttempt quiz={view.quiz.id} attempt={open.id} />
         </Modal>
       )}
     </>
@@ -2778,7 +2896,7 @@ function Builder({ view, generate, reload }: { view: QuizView; generate: string 
 
   const dirty = draft !== null;
   const change = (patch: Partial<Question>): void => setDraft({ ...(editing as Question), ...patch });
-  const setting = (patch: Partial<Pick<Quiz, 'shuffle_questions' | 'shuffle_options'>>): void => {
+  const setting = (patch: Partial<Pick<Quiz, 'shuffle_questions' | 'shuffle_options' | 'guest_name'>>): void => {
     void act('Could not change the quiz', async () => {
       await host.put(`quiz?id=${Q(quiz.id)}`, patch);
       reload();
@@ -2836,6 +2954,17 @@ function Builder({ view, generate, reload }: { view: QuizView; generate: string 
           <label className="qz-check">
             <input type="checkbox" checked={quiz.shuffle_options} onChange={(event: { target: HTMLInputElement }) => setting({ shuffle_options: event.target.checked })} /> Shuffle options
           </label>
+          {/* how a guest from a public link gives their name (Academy REQ70) */}
+          <Row gap="sm" align="center">
+            <span className="qz-small">Guests give their name</span>
+            <Seg aria-label="Guests give their name">
+              {GUEST_NAME_CHOICES.map(([value, label]) => (
+                <SegItem key={value} active={quiz.guest_name === value} selected={quiz.guest_name === value} onClick={() => setting({ guest_name: value })}>
+                  {label}
+                </SegItem>
+              ))}
+            </Seg>
+          </Row>
           <span style={{ width: 70 }}>
             <Input aria-label="How many questions to generate" type="number" value={count} onChange={(event: { target: HTMLInputElement }) => setCount(event.target.value)} />
           </span>
@@ -2997,6 +3126,8 @@ interface WaitingAnswer_ {
   attempt: string;
   person: string;
   name: string;
+  // a guest's, from a public link (Academy REQ74)
+  guest?: boolean;
   question: Question;
   response: string;
   completed_at: string;
@@ -3240,6 +3371,12 @@ function GradingTab({ view, reloadQuiz }: { view: QuizView; reloadQuiz: () => vo
                       <button type="button" className="qz-link" onClick={() => setGrading({ list: rows, at: index })}>
                         {answer.name}
                       </button>
+                      {answer.guest && (
+                        <>
+                          {' '}
+                          <span className="qz-badge accent">Guest</span>
+                        </>
+                      )}
                     </td>
                     <td>
                       <span className="qz-one" title={answer.question.prompt}>
@@ -3308,6 +3445,7 @@ function QuizPage({ id, tab, generate }: { id: string; tab: string; generate: st
     { name: '', label: 'My scores', show: true },
     { name: 'compare', label: 'How you compare', show: true },
     { name: 'results', label: 'Results', show: may.results },
+    { name: 'guests', label: 'Guests', show: may.results && (data.guests ?? 0) > 0 },
     { name: 'grade', label: 'To grade', show: may.results && (data.to_grade ?? 0) + quiz.questions.filter((question) => question.type === 'written').length > 0 },
     { name: 'questions', label: 'Questions', show: may.edit },
   ];
@@ -3445,6 +3583,12 @@ function QuizPage({ id, tab, generate }: { id: string; tab: string; generate: st
               .map((held) => (
                 <Link key={held.name} className="qz-tab" to={pageHref(host, `quiz/${Q(id)}${held.name ? `/${held.name}` : ''}`)} aria-current={held.name === active ? 'page' : undefined}>
                   {held.label}
+                  {held.name === 'guests' && (
+                    <>
+                      {' '}
+                      <span className="qz-badge accent">{data.guests}</span>
+                    </>
+                  )}
                   {held.name === 'grade' && (data.to_grade ?? 0) > 0 && (
                     <>
                       {' '}
@@ -3457,6 +3601,7 @@ function QuizPage({ id, tab, generate }: { id: string; tab: string; generate: st
           {active === '' && <MyScoresTab view={data} />}
           {active === 'compare' && <CompareTab id={quiz.id} />}
           {active === 'results' && <ResultsTab view={data} />}
+          {active === 'guests' && <GuestsTab view={data} />}
           {active === 'grade' && <GradingTab view={data} reloadQuiz={reload} />}
           {active === 'questions' && <Builder key={quiz.id} view={data} generate={generate} reload={reload} />}
         </div>

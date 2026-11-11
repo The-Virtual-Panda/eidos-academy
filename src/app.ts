@@ -32,6 +32,8 @@ const entry: AppEntry<Api> = {
     host.route('POST', 'attempt', (request) => api.submit(request.body as Parameters<Api['submit']>[0]));
     host.route('GET', 'to-grade', (request) => api.toGrade(need(request, 'id')));
     host.route('POST', 'grade', (request) => api.grade(request.body as Parameters<Api['grade']>[0]));
+    host.route('GET', 'guests', (request) => api.guests(need(request, 'id')));
+    host.route('DELETE', 'guests', (request) => api.removeGuests(need(request, 'id'), { attempt: request.query.get('attempt') ?? undefined, link: request.query.get('link') ?? undefined }));
 
     host.route('GET', 'course', (request) => api.course(need(request, 'id')));
     host.route('POST', 'course', (request) => api.createCourse(request.body as { title: string; description?: string }));

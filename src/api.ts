@@ -1,5 +1,6 @@
 // What the page and the commands both ask of the plugin, and the soft permission over it:
 // who is shown what (Academy REQ23). The files stay readable by anyone with the project.
+import { GUEST_ATTEMPT } from './share.ts';
 import { HostError, type Host } from 'eidosmd/plugin';
 import {
   accessOf,
@@ -43,6 +44,8 @@ import {
   type Question,
   type Quiz,
   type QuizStatus,
+  GUEST_NAMES,
+  type GuestName,
 } from './model.ts';
 import { LOCAL_PERSON, Store, type ProjectPerson } from './store.ts';
 
@@ -269,7 +272,9 @@ export function makeApi(host: Host) {
           official_why: store.cannotSign(),
         },
         // written answers waiting for a grade, for those who grade them (Academy REQ65)
-        to_grade: canSeeResults(quiz, store.access()) ? writtenAnswers(store.officialAttempts(quiz.id)).filter((answer) => answer.earned === null).length : null,
+        to_grade: canSeeResults(quiz, store.access()) ? writtenAnswers([...store.officialAttempts(quiz.id), ...store.guestAttempts(quiz.id)]).filter((answer) => answer.earned === null).length : null,
+        // guests' attempts from its public links, for the Guests tab (Academy REQ72); null to anyone who may not see them
+        guests: canSeeResults(quiz, store.access()) ? store.guestAttempts(quiz.id).length : null,
         scores: myScores(mine),
         practice: practiceSets(quiz, mine),
         whole_quiz: askable(quiz).map((question) => question.id),
@@ -309,6 +314,12 @@ export function makeApi(host: Host) {
       const me = store.me();
       const own = myAttempts(quiz.id, me?.alias ?? null).find((attempt) => attempt.id === attemptId);
       if (own) return own;
+      if (attemptId.startsWith(GUEST_ATTEMPT)) {
+        if (!canSeeResults(quiz, store.access())) throw new HostError(403, "guests' answers are shown to the quiz's creator, its proctors, and the project's owners");
+        const guest = store.guestAttempts(quiz.id).find((attempt) => attempt.id === attemptId);
+        if (!guest) throw new HostError(404, `no guest's attempt ${attemptId} on this quiz`);
+        return guest;
+      }
       const found = store.officialAttempts(quiz.id).find((attempt) => attempt.id === attemptId);
       if (!canSeeResults(quiz, store.access())) {
         // someone who follows a course sees the answers of the people enrolled in it
@@ -357,7 +368,11 @@ export function makeApi(host: Host) {
       const quiz = store.quiz(id);
       if (!canSeeResults(quiz, store.access())) throw new HostError(403, "a quiz's written answers are graded by its creator, its proctors, and the project's owners");
       const names = new Map(store.people().map((person) => [person.alias, person.name]));
-      const answers = writtenAnswers(store.officialAttempts(quiz.id)).map((answer) => ({ ...answer, name: names.get(answer.person) ?? answer.person }));
+      const guests = new Map(store.guestAttempts(quiz.id).map((attempt) => [attempt.id, attempt.guest?.name ?? null]));
+      // a guest's written answer waits beside the project's people's, marked as a guest's (Academy REQ74)
+      const answers = writtenAnswers([...store.officialAttempts(quiz.id), ...store.guestAttempts(quiz.id)]).map((answer) =>
+        guests.has(answer.attempt) ? { ...answer, name: guests.get(answer.attempt) ?? 'A guest', guest: true } : { ...answer, name: names.get(answer.person) ?? answer.person, guest: false },
+      );
       return { waiting: answers.filter((answer) => answer.earned === null), graded: answers.filter((answer) => answer.earned !== null).reverse() };
     },
 
@@ -386,7 +401,7 @@ export function makeApi(host: Host) {
         if (!canSeeResults(quiz, store.access())) throw new HostError(403, "a quiz's written answers are graded by its creator, its proctors, and the project's owners");
         grader = store.signer('Grading').alias!;
       }
-      const attempt = store.officialAttempts(quiz.id).find((held) => held.id === input.attempt);
+      const attempt = (input.attempt.startsWith(GUEST_ATTEMPT) ? store.guestAttempts(quiz.id) : store.officialAttempts(quiz.id)).find((held) => held.id === input.attempt);
       if (!attempt) throw new HostError(404, `no official attempt ${input.attempt} on this quiz`);
       const answer = attempt.answers.find((held) => held.question.id === input.question);
       if (!answer) throw new HostError(404, `attempt ${attempt.id} has no question ${input.question}`);
@@ -410,6 +425,32 @@ export function makeApi(host: Host) {
       return grade;
     },
 
+    // ---- guests' attempts from a quiz's public links (Academy REQ72, REQ73) ----
+
+    guests(id: string) {
+      const quiz = store.quiz(id);
+      if (!canSeeResults(quiz, store.access())) throw new HostError(403, "guests' attempts are shown to the quiz's creator, its proctors, and the project's owners");
+      return {
+        attempts: store.guestAttempts(quiz.id).map((attempt) => ({
+          id: attempt.id,
+          name: attempt.guest?.name ?? null,
+          link: attempt.guest?.link ?? '',
+          completed_at: attempt.completed_at,
+          score: attempt.score,
+          total: attempt.total,
+          waiting: attempt.waiting ?? 0,
+        })),
+      };
+    },
+
+    removeGuests(id: string, which: { attempt?: string; link?: string }) {
+      const quiz = store.quiz(id);
+      if (!canSeeResults(quiz, store.access())) throw new HostError(403, "guests' attempts are removed by the quiz's creator, its proctors, and the project's owners");
+      if (typeof which.link === 'string' && which.link !== '') return { removed: store.removeGuestAttempts(quiz.id, { link: which.link }) };
+      if (typeof which.attempt === 'string' && which.attempt.startsWith(GUEST_ATTEMPT)) return { removed: store.removeGuestAttempts(quiz.id, { submission: which.attempt }) };
+      throw new HostError(400, "name the guest's attempt, or the link whose attempts to remove");
+    },
+
     // ---- from the page, under the soft permission ----
 
     async createQuiz(input: { title: string; draws_from?: string[]; course?: string | null; place?: number | null }) {
@@ -428,6 +469,7 @@ export function makeApi(host: Host) {
         status?: QuizStatus;
         shuffle_questions?: boolean;
         shuffle_options?: boolean;
+        guest_name?: GuestName;
       },
     ) {
       let quiz = store.quiz(id);
@@ -448,6 +490,7 @@ export function makeApi(host: Host) {
         ...(patch.created_by !== undefined ? { created_by: patch.created_by } : {}),
         ...(typeof patch.shuffle_questions === 'boolean' ? { shuffle_questions: patch.shuffle_questions } : {}),
         ...(typeof patch.shuffle_options === 'boolean' ? { shuffle_options: patch.shuffle_options } : {}),
+        ...(patch.guest_name !== undefined && GUEST_NAMES.includes(patch.guest_name) ? { guest_name: patch.guest_name } : {}),
       };
       await store.saveQuiz(next);
       return store.quiz(id);

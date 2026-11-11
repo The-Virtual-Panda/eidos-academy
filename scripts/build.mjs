@@ -2,7 +2,7 @@
 // from (linked by `eidos plugin new`, or `eidos plugin link dist`): cli.js and
 // app.js, CommonJS bundles whose one import from the host, eidosmd/plugin, the
 // host answers; page.js, whose react and eidosmd/page imports the page
-// answers; and manifest.yaml, instructions.md, and README.md beside them, the manifest's
+// answers; guest.js, the module a public link's guests take a quiz in; and manifest.yaml, instructions.md, and README.md beside them, the manifest's
 // built_with stamped with the eidosmd this build compiled against, so the app
 // can say when it runs on a version this plugin was not tested with. With
 // --watch it builds again on every change, and the app reloads the plugin as
@@ -41,6 +41,9 @@ const builds = [
     external: ['react', 'react/jsx-runtime', 'eidosmd/page'],
     legalComments: 'none',
   },
+  // the view a public link's guests take a quiz in, run by Eidos in a sandboxed frame (Plugin Share Links REQ14, REQ26): one
+  // module with nothing to import, since the frame fetches nothing
+  { entryPoints: ['src/guest.ts'], outfile: 'dist/guest.js', bundle: true, platform: 'browser', format: 'esm', target: 'es2022', legalComments: 'none' },
 ];
 copy();
 const contexts = await Promise.all(builds.map((options) => context(options)));

@@ -5,6 +5,8 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import { referenceLink } from './question.ts';
+import { GUEST_FOLDER, guestAttempt, guestCopy, KEY_FOLDER, shareKey } from './share.ts';
 import { HostError, type Host } from 'eidosmd/plugin';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import {
@@ -13,6 +15,7 @@ import {
   blankQuestion,
   CARDS_A_SESSION,
   drawId,
+  askable,
   isDeckSource,
   parseAttempt,
   parseCourse,
@@ -273,6 +276,46 @@ export class Store {
   async saveQuiz(quiz: Quiz): Promise<void> {
     mkdirSync(path.dirname(this.abs(quiz.path)), { recursive: true });
     await this.host.writeFile(quiz.path, renderQuiz(quiz));
+    // a quiz shared by a public link: its link follows it (Academy REQ68)
+    if (existsSync(this.abs(this.sharePaths(quiz.id).guest))) await this.writeShare(this.quiz(quiz.id));
+  }
+
+  // ---- a quiz's public link (Academy REQ68) ------------------------------------------------
+
+  sharePaths(quizId: string): { guest: string; key: string } {
+    return { guest: `${this.workspaceRel}/${GUEST_FOLDER}/${quizId}.json`, key: `${this.workspaceRel}/${KEY_FOLDER}/${quizId}.json` };
+  }
+
+  // The guest copy and the key, written as the quiz stands; each only when it changed, so a link is told of a real change.
+  async writeShare(quiz: Quiz): Promise<{ guest: string; key: string }> {
+    const paths = this.sharePaths(quiz.id);
+    const course = quiz.course ? (this.list().courses.find((held) => held.id === quiz.course)?.title ?? null) : null;
+    const titles = new Map(
+      this.sectionsOf(quiz.questions.map((question) => referenceLink(question.reference)).flatMap((link) => (link?.kind === 'blueprint' ? [link.id] : []))).map((held) => [held.id, held.title]),
+    );
+    const asked = askable(quiz);
+    const files: Array<[string, unknown]> = [
+      [paths.guest, guestCopy(quiz, asked, course)],
+      [paths.key, shareKey(asked, (id) => titles.get(id) ?? null)],
+    ];
+    for (const [rel, value] of files) {
+      const text = `${JSON.stringify(value, null, 2)}\n`;
+      if (existsSync(this.abs(rel)) && readFileSync(this.abs(rel), 'utf8') === text) continue;
+      mkdirSync(path.dirname(this.abs(rel)), { recursive: true });
+      await this.host.writeFile(rel, text);
+    }
+    return paths;
+  }
+
+  // The quiz a file of the plugin's folder holds, or null for a deck, a course, or anything else.
+  quizAt(rel: string): Quiz | null {
+    if (!rel.endsWith('.md') || !rel.startsWith(`${this.folderName()}/`) || path.posix.basename(rel) === COURSE_FILE || !existsSync(this.abs(rel))) return null;
+    try {
+      const source = readFileSync(this.abs(rel), 'utf8');
+      return isDeckSource(source) ? null : this.quiz(parseQuiz(source, rel, null).id);
+    } catch {
+      return null;
+    }
   }
 
   private courseFolder(courseId: string | null): string {
@@ -306,6 +349,7 @@ export class Store {
       course,
       shuffle_questions: true,
       shuffle_options: true,
+      guest_name: 'required',
       questions: [],
       path: this.freePath(this.courseFolder(course), title),
     };
@@ -507,6 +551,28 @@ export class Store {
     if (!attempts.some((attempt) => attempt.answers.some((answer) => answer.question.type === 'written'))) return attempts;
     const grades = this.grades(quiz);
     return attempts.map((attempt) => applyGrades(attempt, grades));
+  }
+
+  // Guests' attempts at a quiz from its public links, newest first, with their written answers' grades (Academy REQ72, REQ74).
+  // A host before share links has none.
+  guestAttempts(quizId: string): Attempt[] {
+    if (typeof this.host.submissions !== 'function') return [];
+    const quiz = this.quiz(quizId);
+    const attempts = this.host.submissions().flatMap((submission) => guestAttempt(submission, quiz) ?? []);
+    const grades = attempts.some((attempt) => attempt.answers.some((answer) => answer.question.type === 'written')) ? this.grades(quizId) : [];
+    return attempts.map((attempt) => applyGrades(attempt, grades)).sort((a, b) => b.completed_at.localeCompare(a.completed_at));
+  }
+
+  // A guest's attempt taken out, or every one that came through one link (REQ73).
+  removeGuestAttempts(quizId: string, which: { submission: string } | { link: string }): number {
+    let removed = 0;
+    for (const attempt of this.guestAttempts(quizId)) {
+      const guest = attempt.guest;
+      if (!guest || ('link' in which ? guest.link !== which.link : attempt.id !== which.submission)) continue;
+      this.host.removeSubmission({ link: guest.link, id: guest.submission });
+      removed += 1;
+    }
+    return removed;
   }
 
   // ---- grades of written answers (Academy REQ66) -----------------------------------------

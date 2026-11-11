@@ -51,6 +51,7 @@ const quiz: Quiz = {
   course: null,
   shuffle_questions: true,
   shuffle_options: false,
+  guest_name: 'optional',
   path: 'academy/a-quiz.md',
   questions: [
     { ...blankQuestion('q-one'), prompt: 'First line\n\nSecond paragraph', options: ['Right', 'Wrong'], answer: 0, correct: [0], why: 'Because', reference: 'Page 1' },

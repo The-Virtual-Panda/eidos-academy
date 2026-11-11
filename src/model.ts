@@ -8,6 +8,9 @@ import { answerText, blankQuestion, isRight, questionProblems, responseProblem, 
 export * from './question.ts';
 
 export type QuizStatus = 'open' | 'closed';
+// how a guest taking the quiz from a public link gives their name (Academy REQ70)
+export type GuestName = 'required' | 'optional' | 'none';
+export const GUEST_NAMES: readonly GuestName[] = ['required', 'optional', 'none'];
 
 export interface Quiz {
   id: string;
@@ -27,6 +30,7 @@ export interface Quiz {
   // each attempt takes the questions, and their options, in a new order (Academy REQ62)
   shuffle_questions: boolean;
   shuffle_options: boolean;
+  guest_name: GuestName;
   questions: Question[];
   // root-relative
   path: string;
@@ -84,6 +88,9 @@ export interface Attempt {
   answers: AttemptAnswer[];
   // how many written answers still wait for a grade; filled when the attempt is read
   waiting?: number;
+  // a guest's attempt from a quiz's public link (Academy REQ71, REQ72): the name they gave, the link, and the submission Eidos
+  // kept it as; never counted in a score of the project's people (REQ75)
+  guest?: { name: string | null; link: string; submission: string };
 }
 
 // A grade of one written answer, kept in the grader's own folder (Academy REQ66).
@@ -309,6 +316,7 @@ export function parseQuiz(source: string, path: string, course: string | null): 
     course,
     shuffle_questions: data['shuffle_questions'] !== false,
     shuffle_options: data['shuffle_options'] !== false,
+    guest_name: GUEST_NAMES.includes(data['guest_name'] as GuestName) ? (data['guest_name'] as GuestName) : 'required',
     questions,
     path,
   };
@@ -326,6 +334,7 @@ export function renderQuiz(quiz: Quiz): string {
       rank: quiz.rank === Number.MAX_SAFE_INTEGER ? null : quiz.rank,
       shuffle_questions: quiz.shuffle_questions ? null : false,
       shuffle_options: quiz.shuffle_options ? null : false,
+      guest_name: quiz.guest_name === 'required' ? null : quiz.guest_name,
     },
     renderQuestions(quiz.questions),
   );
@@ -786,7 +795,7 @@ export function makeAttempt(input: { id: string; quiz: Quiz; kind: AttemptKind; 
   return withTotals(attempt);
 }
 
-function withTotals(attempt: Attempt): Attempt {
+export function withTotals(attempt: Attempt): Attempt {
   attempt.score = attempt.answers.reduce((sum, answer) => sum + (answer.earned ?? 0), 0);
   attempt.total = attempt.answers.reduce((sum, answer) => sum + answer.question.points, 0);
   attempt.waiting = attempt.answers.filter((answer) => answer.earned === null).length;

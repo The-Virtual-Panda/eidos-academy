@@ -67,6 +67,12 @@ Practice stays on your machine, never shared and never counted. An official atte
 
 Scoring runs on good faith. What each person is shown is a soft permission, not security: the answer key and committed results are files anyone with the project can read.
 
+## Sharing a quiz by a public link
+
+On Eidos online, or a team's own server, **Share** on a quiz makes a link anyone can take it from, with no account, once Eidos has reviewed this version of Academy and the project's owner has turned on public links for it. A guest gives their name as the quiz asks (**Guests give their name** on its Questions tab: required, optional, or not asked), answers one question at a time with each answer checked as they give it, and sees their score at the end. The answers never reach their browser: Eidos checks each one against the quiz's key.
+
+Guests' attempts land on the quiz's **Guests** tab, live, apart from the project's people, and count in no score, average, or course. Open one to see every answer, grade a guest's written answers on **To grade** beside everyone else's, and **Remove** an attempt, or every attempt from one link, when you're done with it.
+
 ## Coming from Quizzes
 
 Academy was called Quizzes before 0.3.0. In a project that used Quizzes, Academy's list offers **Move them into Academy** to a project owner. Every quiz, course, result, and enrollment moves over with the same ids.
