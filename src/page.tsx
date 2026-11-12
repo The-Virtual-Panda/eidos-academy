@@ -3464,6 +3464,12 @@ function QuizPage({ id, tab, generate }: { id: string; tab: string; generate: st
               <InlineText className="qz-h1" as="h1" label="The quiz's name" value={quiz.title} editable={may.edit} onSave={(title) => title.trim() !== '' && patch({ title })} />
             </div>
             <span className="qz-head-actions">
+              {/* a public link to the quiz (Academy REQ68); a host before share links has no `share` */}
+              {may.edit && data.askable > 0 && typeof host.share === 'function' && (
+                <Button size="sm" onClick={() => host.share(quiz.path, quiz.title)}>
+                  Share
+                </Button>
+              )}
               {may.edit && data.askable > 0 && (
                 <Button size="sm" onClick={() => setMakingDeck(true)}>
                   Make flashcards from it
