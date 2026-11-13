@@ -11,6 +11,9 @@ export const CSS = `
 .qz a.qz-link:hover { text-decoration: underline; }
 .qz-eyebrow { display: inline-flex; align-items: center; gap: 8px; padding: 4px 12px; margin-bottom: 12px; border-radius: 999px; background: var(--color-accent-soft); color: var(--color-accent) !important; font-size: var(--text-xs); font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }
 .qz-eyebrow::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+/* the laptop takes the dot's place on what is kept just for the person */
+.qz-eyebrow.qz-chip-local::before { content: none; }
+.qz-eyebrow + .qz-eyebrow { margin-left: 8px; }
 .qz-h1 { margin: 0 0 6px; font-size: var(--text-6xl); font-weight: 700; line-height: 1.15; letter-spacing: -.03em; }
 .qz-h1 span { color: var(--color-accent); }
 .qz-h2 { margin: 34px 0 12px; font-size: var(--text-3xl); font-weight: 700; letter-spacing: -.02em; }
@@ -42,6 +45,7 @@ export const CSS = `
 .qz-option { display: block; width: 100%; min-height: 44px; margin-bottom: 10px; padding: 14px 18px; border: 1px solid var(--color-line); border-radius: var(--radius-3xl); background: var(--color-raised); color: var(--color-fg); font: inherit; font-weight: 500; line-height: 1.45; text-align: left; cursor: pointer; }
 .qz-option:hover:not(:disabled) { border-color: var(--color-accent); background: var(--color-hover); }
 .qz-option:disabled { cursor: default; }
+.qz-option.on, .qz-option.on:hover:not(:disabled) { border-color: var(--color-accent); background: var(--color-accent-soft); box-shadow: 0 0 0 1px var(--color-accent); }
 .qz-option.correct { border-color: var(--color-ok); background: color-mix(in srgb, var(--color-ok) 12%, transparent); }
 .qz-option.wrong { border-color: var(--color-error); background: color-mix(in srgb, var(--color-error) 12%, transparent); }
 .qz-feedback { margin: 18px 0; padding: 12px 16px; border-left: 3px solid var(--color-line); border-radius: 0 12px 12px 0; background: var(--color-raised); white-space: pre-wrap; }
@@ -130,6 +134,9 @@ export const CSS = `
 .qz-menu button { display: block; width: 100%; padding: 6px 10px; border: 0; border-radius: var(--radius-md); background: none; color: var(--color-fg); font: inherit; text-align: left; cursor: pointer; }
 .qz-menu button:hover, .qz-menu button:focus-visible { background: var(--color-hover); outline: none; }
 .qz-menu button[data-danger] { color: var(--color-error); }
+.qz-menu button:disabled { color: var(--color-muted); cursor: default; }
+.qz-menu button:disabled:hover { background: none; }
+.qz-menu button small { display: block; max-width: 260px; color: var(--color-faint); font-size: var(--text-sm); white-space: normal; }
 .qz-menu hr { height: 1px; margin: 4px 0; border: 0; background: var(--color-line); }
 .qz-filters { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
 .qz-filters-top { display: flex; align-items: center; gap: 6px; }
@@ -216,6 +223,12 @@ button.qz-add { padding: 2px 8px; border: 1px dashed var(--color-line-strong); b
 .qz-n { display: inline-flex; flex: none; align-items: center; justify-content: center; width: 26px; height: 26px; border-radius: 50%; background: var(--color-hover); color: var(--color-muted); font-size: var(--text-sm); font-weight: 700; }
 .qz-grow { flex: 1; min-width: 0; }
 .qz-move { display: inline-flex; gap: 4px; }
+.qz-local-mark { display: inline-flex; flex: none; align-items: center; margin-left: auto; color: var(--color-muted); }
+.qz-local-mark + * { margin-left: 6px; }
+.qz-chip-local { display: inline-flex; gap: 6px; align-items: center; }
+.qz-row-item.qz-sortable { cursor: grab; user-select: none; }
+.qz-row-item.qz-held { border-color: var(--color-accent); box-shadow: var(--shadow-popover); cursor: grabbing; }
+.qz-grip { flex: none; padding: 4px 2px; color: var(--color-muted); font-size: var(--text-lg); line-height: 1; touch-action: none; cursor: grab; }
 .qz-input, .qz-area, .qz-select { width: 100%; border: 1px solid var(--color-line); border-radius: var(--radius-2xl); background: var(--color-raised); color: var(--color-fg); font: inherit; }
 .qz-input { height: 52px; padding: 0 16px; font-size: var(--text-lg); }
 .qz-input.correct { border-color: var(--color-ok); background: color-mix(in srgb, var(--color-ok) 12%, transparent); }
@@ -328,6 +341,8 @@ export interface MenuEntry {
   danger?: boolean;
   // a line before it, setting its group apart
   rule?: boolean;
+  // why it can't be picked now, said under it
+  disabled?: string;
 }
 
 // A row's menu at the pointer, as the page's own is (the kit does not hand a plugin its RowMenu yet).
@@ -370,12 +385,14 @@ export function ContextMenu({ x, y, items, onClose }: { x: number; y: number; it
             type="button"
             role="menuitem"
             data-danger={item.danger || undefined}
+            disabled={item.disabled !== undefined}
             onClick={() => {
               onClose();
               void item.run();
             }}
           >
             {item.label}
+            {item.disabled && <small>{item.disabled}</small>}
           </button>
         </div>
       ))}

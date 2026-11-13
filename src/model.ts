@@ -34,6 +34,8 @@ export interface Quiz {
   questions: Question[];
   // root-relative
   path: string;
+  // one person's, on this machine, in the plugin's local folder (Academy REQ76); never in the file
+  local: boolean;
 }
 
 export interface Course {
@@ -46,6 +48,7 @@ export interface Course {
   study_plan: string[];
   // root-relative path of its course.md
   path: string;
+  local: boolean;
 }
 
 export type AttemptKind = 'official' | 'practice';
@@ -319,6 +322,7 @@ export function parseQuiz(source: string, path: string, course: string | null): 
     guest_name: GUEST_NAMES.includes(data['guest_name'] as GuestName) ? (data['guest_name'] as GuestName) : 'required',
     questions,
     path,
+    local: false,
   };
 }
 
@@ -363,6 +367,7 @@ export function parseCourse(source: string, path: string): Course {
     content: strings(data['content']),
     study_plan: strings(data['study_plan']),
     path,
+    local: false,
   };
 }
 
@@ -401,6 +406,7 @@ export interface Deck {
   per_session: number;
   cards: Card[];
   path: string;
+  local: boolean;
 }
 
 // A card reads as a page, the way a question does:
@@ -507,6 +513,7 @@ export function parseDeck(source: string, path: string, course: string | null): 
     per_session: Number.isInteger(size) && size > 0 ? size : CARDS_A_SESSION,
     cards,
     path,
+    local: false,
   };
 }
 
@@ -901,6 +908,13 @@ export interface MyScores {
   history: Array<{ id: string; kind: AttemptKind; mode: AttemptMode; score: number; total: number; percent: number; completed_at: string; waiting: number }>;
 }
 
+// The attempts that count as a person's own scores: official ones, or on a local quiz, every whole-quiz
+// attempt taken on this machine, which counts there as an official one does (Academy REQ77).
+export function scoredAttempts(quiz: Pick<Quiz, 'local'>, attempts: Attempt[]): Attempt[] {
+  if (!quiz.local) return attempts;
+  return attempts.map((attempt) => (attempt.kind === 'practice' && attempt.mode === 'whole' ? { ...attempt, kind: 'official' as const } : attempt));
+}
+
 export function myScores(attempts: Attempt[]): MyScores {
   const sorted = [...attempts].sort(byTime);
   const official = sorted.filter((attempt) => attempt.kind === 'official' && settled(attempt));
@@ -1090,13 +1104,15 @@ export function canSeeCourse(course: Pick<Course, 'created_by'>, quizzes: Array<
 }
 
 // Change the quiz: its questions, its title, what it draws from, and its course.
-export function canEdit(thing: { created_by: string | null; proctors?: string[] }, person: Person | null): boolean {
+export function canEdit(thing: { created_by: string | null; proctors?: string[]; local?: boolean }, person: Person | null): boolean {
   if (canManage(thing, person)) return true;
   return person !== null && person.alias !== null && (thing.proctors ?? []).includes(person.alias);
 }
 
-// Change who holds it: its proctors and its creator, and delete it.
-export function canManage(thing: { created_by: string | null }, person: Person | null): boolean {
+// Change who holds it: its proctors and its creator, and delete it. A local one is the person's own on
+// their machine, so whoever is at it holds it (Academy REQ76).
+export function canManage(thing: { created_by: string | null; local?: boolean }, person: Person | null): boolean {
+  if (thing.local) return true;
   if (!person) return false;
   return person.owner || thing.created_by === null || (person.alias !== null && person.alias === thing.created_by);
 }

@@ -6,7 +6,7 @@ Academy builds quizzes and flashcard decks on a project's content. A person take
 
 - `academy/` (the folder the framework declares as `@academy/academy`): a one-off quiz or deck is a file directly in it, a deck marked `type: deck`. A course is a folder holding `course.md` and its quizzes and decks. Never move, rename, or delete these by hand; use the commands.
 - `.eidos/plugins/academy/results/<alias>/`: official attempts, one file each; `reviews/`, the person's sessions with decks, one file each; `sessions.yaml`, the study plan sessions they finished; and `enrollments.yaml`, the courses they are in. Never write these.
-- `.eidos/plugins/academy/local/`: practice attempts, and the deck sessions of nobody in particular, on this machine. Never committed.
+- `.eidos/plugins/academy/local/`: practice attempts, the deck sessions of nobody in particular, and in `academy/` the quizzes, decks, and courses a person keeps just for themselves, laid out as the shared folder is. On this machine alone, never committed or synced.
 - A project's content (lessons, wiki pages, study plans) is never in any of these. It stays blueprints and assets in the project.
 
 ### Writing a quiz
@@ -15,7 +15,7 @@ The CLI owns the file; the conversation owns the words.
 
 ```bash
 eidos academy list [--json]
-eidos academy quiz new "<Title>" --draws-from <blueprint id, asset path, or link> [--course <id>] [--place <n>] [--created-by <alias>] [--closed] [--json]
+eidos academy quiz new "<Title>" --draws-from <blueprint id, asset path, or link> [--course <id>] [--place <n>] [--created-by <alias>] [--closed] [--local] [--json]
 eidos academy question add <quiz> [--type <type>] --prompt "<text>" <its answer> --why "<text>" [--context "<text>"] [--image <asset>] [--points <n>] [--reference <ref>] [--json]
 eidos academy question set <quiz> <question> [--type ...] [--prompt ...] [<its answer>] [--why ...] [--context ...] [--image ...] [--points <n>] [--reference ...] [--regenerated] [--json]
 eidos academy question remove <quiz> <question>
@@ -52,10 +52,21 @@ When you generate questions:
 
 A quiz is open by default as soon as it has a question, so someone could start it while you are still writing. When you write more than one question, keep it closed while you do: start it with `eidos academy quiz new --closed` (on a quiz that already exists, `eidos academy quiz set <quiz> --status closed`), then run `eidos academy quiz set <quiz> --status open` after the last question. A quiz the person closed stays closed unless they ask you to open it. Closed, a quiz takes no official attempts, and those who edit it can try it out as practice.
 
+### Just for the person
+
+A quiz, a deck, or a course is the project's unless the person asks for one just for themselves: then pass `--local` to `quiz new`, `deck new`, or `course new`. A local one lives in the plugin's local folder on this machine, never committed or synced, and nobody else sees it. Its questions and cards are written with the same commands. A local course holds only local quizzes and decks, and a shared one only shared ones; a deck made `--from-quiz` a local quiz is local too. A local quiz is taken on this machine, its whole attempts counting as the person's scores, and has no official attempts, results, grading, guests, or public link. `eidos academy list` marks one `local`.
+
+```bash
+eidos academy share <id>   # into the project: ids kept, the person its creator, their attempts staying here as practice
+eidos academy keep <id>    # back to just theirs, refused while anyone has an official attempt, a study session, an enrollment, or a guest's attempt on it, or it has a public link
+```
+
+Share or keep only when the person asks: either changes who sees it.
+
 ### Writing a deck
 
 ```bash
-eidos academy deck new "<Title>" --draws-from <blueprint id, asset path, or link> [--from-quiz <quiz>] [--course <id>] [--place <n>] [--created-by <alias>] [--closed] [--json]
+eidos academy deck new "<Title>" --draws-from <blueprint id, asset path, or link> [--from-quiz <quiz>] [--course <id>] [--place <n>] [--created-by <alias>] [--closed] [--local] [--json]
 eidos academy card add <deck> --front "<text>" --back "<text>" [--reference "<text>"] [--json]
 eidos academy card set <deck> <card> [--front ...] [--back ...] [--reference ...] [--regenerated] [--json]
 eidos academy card remove <deck> <card>
@@ -80,7 +91,7 @@ People study decks on the page. A card is learned once a person answers Got it t
 
 ```bash
 eidos academy course list [--json]
-eidos academy course new "<Title>" [--description ...] [--content <link>] [--study-plan <link>] [--created-by <alias>]
+eidos academy course new "<Title>" [--description ...] [--content <link>] [--study-plan <link>] [--created-by <alias>] [--local]
 eidos academy course show <course> [--json]
 eidos academy course set <course> [--title ...] [--add-content ...] [--add-study-plan ...] [--created-by <alias>]
 eidos academy course remove <course>

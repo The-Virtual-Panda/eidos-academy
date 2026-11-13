@@ -13,6 +13,7 @@ Turn your project's content into quizzes and flashcard decks, group them into co
 - **Build a deck of flashcards** the same ways, or make one from a quiz you already have: each question becomes a card, with its answer and why on the back.
 - **Study at your own pace.** Flip a card and answer Got it or Still learning. A card is learned once you get it twice in a row. Each session brings the cards you are still learning first, then new ones, then the learned ones you studied longest ago. Nothing comes due, and nothing nags you.
 - **Keep studying** shows every deck with how many cards you have learned and when you last studied it, and studies across all of them at once.
+- **Keep a quiz, a deck, or a course just for you.** Pick **Just me** when you make one and it stays on your machine: nobody else sees it or your scores, and taking it is one **Take quiz** button whose attempts count as your scores. Share it with the project whenever you like, and take a shared one back while nobody else has history with it.
 - **Group quizzes and decks into courses**, in one order, or keep either as a one-off. The order suggests a path and locks nothing.
 - **Enroll in a course** to follow your progress across it: which quizzes you have taken and every score. Anyone can enroll, a course's creator and proctors too, and the people who run a course see how everyone enrolled is doing.
 - **See your scores over time**, and how you compare with a quiz's average. A quiz's creator, the proctors they add, and the project's owners see everyone's results, down to each answer. Where you stand in a deck is yours alone.
@@ -55,15 +56,16 @@ Later, **New quiz**, **New deck**, and **New course** on Academy's list start mo
 
 ## Practice and official attempts
 
-| What                                                  | Where it is kept                          | Shared?           |
-| ----------------------------------------------------- | ----------------------------------------- | ----------------- |
-| One-off quizzes and decks                             | `academy/<title>.md`                      | Committed         |
-| A course and its quizzes and decks                    | `academy/<course>/`                       | Committed         |
-| Official attempts, deck sessions, enrollments, grades | `.eidos/plugins/academy/results/<alias>/` | Committed         |
-| Practice attempts, sessions with no name              | `.eidos/plugins/academy/local/`           | This machine only |
-| Lessons, wiki pages, study plans                      | Your project's own collections            | Yours             |
+| What                                                                      | Where it is kept                          | Shared?           |
+| ------------------------------------------------------------------------- | ----------------------------------------- | ----------------- |
+| One-off quizzes and decks                                                 | `academy/<title>.md`                      | Committed         |
+| A course and its quizzes and decks                                        | `academy/<course>/`                       | Committed         |
+| Official attempts, deck sessions, enrollments, grades                     | `.eidos/plugins/academy/results/<alias>/` | Committed         |
+| Practice attempts, sessions with no name                                  | `.eidos/plugins/academy/local/`           | This machine only |
+| Quizzes, decks, and courses just for you, and their attempts and sessions | `.eidos/plugins/academy/local/academy/`   | This machine only |
+| Lessons, wiki pages, study plans                                          | Your project's own collections            | Yours             |
 
-Practice stays on your machine, never shared and never counted. An official attempt is shared with the project and kept in your history, and so are your sessions with a deck, so your progress follows you to any machine. A quiz and a deck are markdown files you can read and edit by hand.
+Practice stays on your machine, never shared and never counted, and so does everything you keep just for yourself. An official attempt is shared with the project and kept in your history, and so are your sessions with a deck, so your progress follows you to any machine. A quiz and a deck are markdown files you can read and edit by hand.
 
 Scoring runs on good faith. What each person is shown is a soft permission, not security: the answer key and committed results are files anyone with the project can read.
 

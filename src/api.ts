@@ -1,5 +1,7 @@
 // What the page and the commands both ask of the plugin, and the soft permission over it:
 // who is shown what (Academy REQ23). The files stay readable by anyone with the project.
+import { existsSync } from 'node:fs';
+import path from 'node:path';
 import { GUEST_ATTEMPT } from './share.ts';
 import { HostError, type Host } from 'eidosmd/plugin';
 import {
@@ -23,6 +25,7 @@ import {
   everyone,
   makeAttempt,
   myScores,
+  scoredAttempts,
   normalizeQuestion,
   referenceLink,
   settled,
@@ -66,6 +69,8 @@ export interface QuizRow {
   waiting: boolean;
   may_edit: boolean;
   may_manage: boolean;
+  // kept just for the person, on this machine (Academy REQ76)
+  local: boolean;
 }
 
 export interface DeckRow {
@@ -87,6 +92,7 @@ export interface DeckRow {
   last_studied: string | null;
   may_edit: boolean;
   may_manage: boolean;
+  local: boolean;
 }
 
 export type Api = ReturnType<typeof makeApi>;
@@ -105,6 +111,66 @@ export function makeApi(host: Host) {
     const mine = official.filter((attempt) => attempt.quiz === quiz && attempt.by === alias);
     const counted = mine.filter(settled);
     return counted.length > 0 ? Math.max(...counted.map(percent)) : null;
+  };
+
+  // The person's best on a quiz: their best official attempt, or on a local quiz their best whole attempt here.
+  const ownBest = (quiz: Quiz, alias: string | null, official: Attempt[]): number | null => {
+    if (!quiz.local) return bestOf(quiz.id, alias, official);
+    const counted = scoredAttempts(quiz, myAttempts(quiz.id, alias)).filter((attempt) => attempt.kind === 'official' && settled(attempt));
+    return counted.length > 0 ? Math.max(...counted.map(percent)) : null;
+  };
+
+  // A quiz kept just for the person has nobody else's results to show (Academy REQ77).
+  const notLocal = (quiz: Quiz, what: string): void => {
+    if (quiz.local) throw new HostError(409, `${quiz.title} is just yours, kept on this machine, so it has no ${what}`);
+  };
+
+  // Why a shared quiz, deck, or course can't be kept just for one person again: someone's history
+  // with it would be stranded (Academy REQ80). Null when it can.
+  const keepWhy = (id: string): string | null => {
+    const listed = store.list();
+    const names = (aliases: string[]): string => {
+      const named = [...new Set(aliases)].map((alias) => nameOf(alias) ?? alias);
+      return named.length <= 2 ? named.join(' and ') : `${named.slice(0, 2).join(', ')}, and ${named.length - 2} more`;
+    };
+    const quizWhy = (quiz: Quiz): string | null => {
+      const official = store.officialAttempts(quiz.id);
+      const takers = [...new Set(official.map((attempt) => attempt.by))];
+      if (takers.length > 0) return `${names(takers)} ${takers.length === 1 ? 'has' : 'have'} taken ${quiz.title} officially`;
+      if (store.guestAttempts(quiz.id).length > 0) return `Guests have answered ${quiz.title} from a public link`;
+      if (existsSync(path.join(store.root, store.sharePaths(quiz.id).guest))) return `${quiz.title} has a public link`;
+      return null;
+    };
+    const deckWhy = (deck: Deck): string | null => {
+      const studied = store.studiedBy(deck.id);
+      return studied.length > 0 ? `${names(studied)} ${studied.length === 1 ? 'has' : 'have'} studied ${deck.title}` : null;
+    };
+    const course = listed.courses.find((held) => held.id.toLowerCase() === id.toLowerCase());
+    if (course) {
+      const enrolled = store.enrolledIn(course.id);
+      if (enrolled.length > 0) return `${names(enrolled.map((person) => person.alias))} ${enrolled.length === 1 ? 'is' : 'are'} enrolled in it`;
+      for (const placed of store.inCourse(course.id)) {
+        const why = placed.kind === 'quiz' ? quizWhy(placed.item) : deckWhy(placed.item);
+        if (why) return why;
+      }
+      return null;
+    }
+    const quiz = listed.quizzes.find((held) => held.id.toLowerCase() === id.toLowerCase());
+    if (quiz) return quizWhy(quiz);
+    return deckWhy(store.deck(id));
+  };
+
+  // A quiz, a deck, or a course by its id, whichever it is.
+  const anything = (id: string): { kind: 'quiz' | 'deck' | 'course'; item: Quiz | Deck | Course } => {
+    const listed = store.list();
+    const key = id.toLowerCase();
+    const course = listed.courses.find((held) => held.id.toLowerCase() === key);
+    if (course) return { kind: 'course', item: course };
+    const quiz = listed.quizzes.find((held) => held.id.toLowerCase() === key);
+    if (quiz) return { kind: 'quiz', item: quiz };
+    const deck = listed.decks.find((held) => held.id.toLowerCase() === key);
+    if (deck) return { kind: 'deck', item: deck };
+    throw new HostError(404, `no quiz, deck, or course ${id}; eidos academy list shows them`);
   };
 
   const nameOf = (alias: string | null): string | null => (alias === null ? null : (store.people().find((person) => person.alias === alias)?.name ?? alias));
@@ -141,10 +207,11 @@ export function makeApi(host: Host) {
         questions: askable(quiz).length,
         created_by: quiz.created_by,
         created_by_name: nameOf(quiz.created_by),
-        best: bestOf(quiz.id, me?.alias ?? null, official),
-        waiting: Boolean(me?.alias) && official.some((attempt) => attempt.quiz === quiz.id && attempt.by === me!.alias && !settled(attempt)),
+        best: ownBest(quiz, me?.alias ?? null, official),
+        waiting: !quiz.local && Boolean(me?.alias) && official.some((attempt) => attempt.quiz === quiz.id && attempt.by === me!.alias && !settled(attempt)),
         may_edit: canEdit(quiz, store.access()),
         may_manage: canManage(quiz, store.access()),
+        local: quiz.local,
       };
     });
   };
@@ -177,6 +244,7 @@ export function makeApi(host: Host) {
         last_studied: progress.last_studied,
         may_edit: canEdit(deck, store.access()),
         may_manage: canManage(deck, store.access()),
+        local: deck.local,
       };
     });
   };
@@ -197,6 +265,16 @@ export function makeApi(host: Host) {
   const quizzesOf = (course: Course): Quiz[] => store.list().quizzes.filter((quiz) => quiz.course === course.id);
   const mayWatch = (course: Course): boolean => canSeeCourse(course, quizzesOf(course), store.access());
 
+  // The attempts a course's progress counts for a person: their official ones, or in a local course
+  // their whole attempts on this machine, signed as them (Academy REQ79).
+  const progressAttempts = (course: Course, alias: string): Attempt[] =>
+    course.local
+      ? store
+          .practiceAttempts()
+          .filter((attempt) => attempt.mode === 'whole' && (attempt.by === alias || attempt.by === LOCAL_PERSON))
+          .map((attempt) => ({ ...attempt, kind: 'official' as const, by: alias }))
+      : store.officialAttempts();
+
   const progressFor = (course: Course, alias: string) => {
     // each quiz keeps its place among the course's quizzes and decks, as the course numbers it
     const quizzes = store
@@ -204,7 +282,7 @@ export function makeApi(host: Host) {
       .map((placed, index) => ({ placed, place: index + 1 }))
       .filter(({ placed }) => placed.kind === 'quiz')
       .map(({ placed, place }) => ({ ...(placed.item as Quiz), place }));
-    const progress = courseProgress(quizzes, store.officialAttempts(), alias);
+    const progress = courseProgress(quizzes, progressAttempts(course, alias), alias);
     const sessions = store.blueprintsOf(course.study_plan);
     const done = store.sessionsDone(alias);
     return { progress, sessions_done: sessions.filter((session) => done[session.id]).length, sessions: sessions.length };
@@ -242,6 +320,7 @@ export function makeApi(host: Host) {
           created_by: course.created_by,
           enrolled: me?.alias ? Boolean(store.enrollmentsOf(me.alias)[course.id]) : false,
           may_edit: canEdit(course, store.access()),
+          local: course.local,
         })),
       };
     },
@@ -267,15 +346,21 @@ export function makeApi(host: Host) {
         may: {
           edit: canEdit(quiz, store.access()),
           manage: canManage(quiz, store.access()),
-          results: canSeeResults(quiz, store.access()),
-          take_official: store.cannotSign() === null,
-          official_why: store.cannotSign(),
+          results: !quiz.local && canSeeResults(quiz, store.access()),
+          take_official: !quiz.local && store.cannotSign() === null,
+          official_why: quiz.local ? null : store.cannotSign(),
+          // a shared one kept just for its holder again, or why not (Academy REQ80)
+          keep: !quiz.local && canManage(quiz, store.access()),
+          keep_why: quiz.local ? null : keepWhy(quiz.id),
         },
         // written answers waiting for a grade, for those who grade them (Academy REQ65)
-        to_grade: canSeeResults(quiz, store.access()) ? writtenAnswers([...store.officialAttempts(quiz.id), ...store.guestAttempts(quiz.id)]).filter((answer) => answer.earned === null).length : null,
+        to_grade:
+          !quiz.local && canSeeResults(quiz, store.access())
+            ? writtenAnswers([...store.officialAttempts(quiz.id), ...store.guestAttempts(quiz.id)]).filter((answer) => answer.earned === null).length
+            : null,
         // guests' attempts from its public links, for the Guests tab (Academy REQ72); null to anyone who may not see them
-        guests: canSeeResults(quiz, store.access()) ? store.guestAttempts(quiz.id).length : null,
-        scores: myScores(mine),
+        guests: !quiz.local && canSeeResults(quiz, store.access()) ? store.guestAttempts(quiz.id).length : null,
+        scores: myScores(scoredAttempts(quiz, mine)),
         practice: practiceSets(quiz, mine),
         whole_quiz: askable(quiz).map((question) => question.id),
         // what the questions' references and the quiz's own sources name, so the page links them
@@ -296,11 +381,13 @@ export function makeApi(host: Host) {
 
     compare(id: string) {
       const quiz = store.quiz(id);
+      notLocal(quiz, 'scores to compare with');
       return compare(store.officialAttempts(quiz.id), store.me()?.alias ?? null);
     },
 
     results(id: string) {
       const quiz = store.quiz(id);
+      notLocal(quiz, "anyone else's results");
       if (!canSeeResults(quiz, store.access())) throw new HostError(403, "a quiz's results are shown to its creator, its proctors, and the project's owners");
       const official = store.officialAttempts(quiz.id);
       const names = new Map(store.people().map((person) => [person.alias, person.name]));
@@ -335,13 +422,18 @@ export function makeApi(host: Host) {
       const quiz = store.quiz(input.quiz);
       if (input.kind !== 'official' && input.kind !== 'practice') throw new HostError(400, 'an attempt is official or practice');
       if (input.kind === 'official' && input.mode !== 'whole') throw new HostError(400, 'an official attempt takes the whole quiz');
+      // a quiz kept just for the person is taken on this machine, its whole attempts counting as their scores (Academy REQ77)
+      const kind: AttemptKind = quiz.local ? 'practice' : input.kind;
       // closed, a quiz takes no official attempts, and only those who edit it may try it out
-      if (quiz.status === 'closed' && (input.kind === 'official' || !canEdit(quiz, store.access()))) throw new HostError(409, 'this quiz is closed');
-      const by = input.kind === 'official' ? store.signer().alias! : store.practiceBy();
-      const earlier = store.officialAttempts(quiz.id).filter((attempt) => attempt.by === by && settled(attempt));
+      if (quiz.status === 'closed' && (kind === 'official' || !canEdit(quiz, store.access()))) throw new HostError(409, 'this quiz is closed');
+      const by = kind === 'official' ? store.signer().alias! : store.practiceBy();
+      const counts = quiz.local ? input.mode === 'whole' : kind === 'official';
+      const earlier = quiz.local
+        ? scoredAttempts(quiz, myAttempts(quiz.id, by === LOCAL_PERSON ? null : by)).filter((attempt) => attempt.kind === 'official' && settled(attempt))
+        : store.officialAttempts(quiz.id).filter((attempt) => attempt.by === by && settled(attempt));
       let attempt: Attempt;
       try {
-        attempt = makeAttempt({ id: store.newAttemptId(), quiz, kind: input.kind, mode: input.mode, by, completedAt: new Date().toISOString(), answers: input.answers });
+        attempt = makeAttempt({ id: store.newAttemptId(), quiz, kind, mode: input.mode, by, completedAt: new Date().toISOString(), answers: input.answers });
       } catch (cause) {
         throw new HostError(409, cause instanceof Error ? cause.message : String(cause));
       }
@@ -352,12 +444,12 @@ export function makeApi(host: Host) {
       return {
         attempt,
         percent: fraction,
-        first: attempt.kind === 'official' && earlier.length === 0,
-        new_best: attempt.kind === 'official' && settled(attempt) && earlier.length > 0 && fraction > Math.max(...earlier.map(percent)),
+        first: counts && earlier.length === 0,
+        new_best: counts && settled(attempt) && earlier.length > 0 && fraction > Math.max(...earlier.map(percent)),
         waiting: attempt.waiting ?? 0,
         change: last ? fraction - percent(last) : null,
-        official_attempts: earlier.length + (attempt.kind === 'official' ? 1 : 0),
-        average: compare(store.officialAttempts(quiz.id), null).average,
+        official_attempts: earlier.length + (counts ? 1 : 0),
+        average: quiz.local ? null : compare(store.officialAttempts(quiz.id), null).average,
         practice: practiceSets(quiz, mine),
       };
     },
@@ -366,6 +458,7 @@ export function makeApi(host: Host) {
 
     toGrade(id: string) {
       const quiz = store.quiz(id);
+      notLocal(quiz, 'answers for anyone else to grade');
       if (!canSeeResults(quiz, store.access())) throw new HostError(403, "a quiz's written answers are graded by its creator, its proctors, and the project's owners");
       const names = new Map(store.people().map((person) => [person.alias, person.name]));
       const guests = new Map(store.guestAttempts(quiz.id).map((attempt) => [attempt.id, attempt.guest?.name ?? null]));
@@ -429,6 +522,7 @@ export function makeApi(host: Host) {
 
     guests(id: string) {
       const quiz = store.quiz(id);
+      notLocal(quiz, 'guests');
       if (!canSeeResults(quiz, store.access())) throw new HostError(403, "guests' attempts are shown to the quiz's creator, its proctors, and the project's owners");
       return {
         attempts: store.guestAttempts(quiz.id).map((attempt) => ({
@@ -453,9 +547,15 @@ export function makeApi(host: Host) {
 
     // ---- from the page, under the soft permission ----
 
-    async createQuiz(input: { title: string; draws_from?: string[]; course?: string | null; place?: number | null }) {
+    async createQuiz(input: { title: string; draws_from?: string[]; course?: string | null; place?: number | null; local?: boolean }) {
       if (input.course) requireEdit(store.course(input.course), 'a course');
-      return store.createQuiz({ title: input.title, draws_from: input.draws_from ?? [], course: input.course ?? null, rank: input.place ?? null });
+      return store.createQuiz({
+        title: input.title,
+        draws_from: input.draws_from ?? [],
+        course: input.course ?? null,
+        rank: input.place ?? null,
+        ...(typeof input.local === 'boolean' ? { local: input.local } : {}),
+      });
     },
 
     async updateQuiz(
@@ -545,7 +645,15 @@ export function makeApi(host: Host) {
       return {
         course,
         created_by_name: nameOf(course.created_by),
-        may: { edit: canEdit(course, store.access()), people: mayWatch(course), enroll: store.cannotSign('Enrolling') === null, enroll_why: store.cannotSign('Enrolling') },
+        may: {
+          edit: canEdit(course, store.access()),
+          people: !course.local && mayWatch(course),
+          // a local course follows the person without enrolling (Academy REQ79)
+          enroll: !course.local && store.cannotSign('Enrolling') === null,
+          enroll_why: course.local ? null : store.cannotSign('Enrolling'),
+          keep: !course.local && canManage(course, store.access()),
+          keep_why: course.local ? null : keepWhy(course.id),
+        },
         enrolled_since: enrolled.find((person) => person.alias === alias)?.since ?? null,
         enrolled_people: enrolled.length,
         people: store
@@ -575,6 +683,7 @@ export function makeApi(host: Host) {
     // Anyone may enroll, a course's creator and its proctors too (Academy REQ41).
     async enroll(id: string) {
       const course = store.course(id);
+      if (course.local) throw new HostError(409, `${course.title} is just yours, so its progress follows you without enrolling`);
       const person = store.signer('Enrolling');
       await store.setEnrolled(person.alias!, course.id, true);
       return { course: course.id, alias: person.alias!, enrolled: true };
@@ -592,6 +701,10 @@ export function makeApi(host: Host) {
     // One enrolled person's quizzes and scores: your own, or anyone's for those REQ43 names.
     courseProgress(id: string, person?: string | null) {
       const course = store.course(id);
+      if (course.local) {
+        const own = store.me()?.alias ?? LOCAL_PERSON;
+        return { course: { id: course.id, title: course.title }, person: { alias: own, name: nameOf(own) ?? 'You' }, mine: true, enrolled_since: null, ...progressFor(course, own) };
+      }
       const me = store.me()?.alias ?? null;
       const alias = person || me;
       if (alias !== me && !mayWatch(course)) throw new HostError(403, "another person's progress is shown to the course's creator, its quizzes' creators and proctors, and the project's owners");
@@ -605,6 +718,7 @@ export function makeApi(host: Host) {
     // Everyone enrolled in a course, each with their progress, for those REQ43 names.
     courseRoster(id: string) {
       const course = store.course(id);
+      if (course.local) throw new HostError(409, `${course.title} is just yours, so nobody else is enrolled in it`);
       if (!mayWatch(course)) throw new HostError(403, "who enrolled in a course is shown to its creator, its quizzes' creators and proctors, and the project's owners");
       const people = store
         .enrolledIn(course.id)
@@ -617,8 +731,29 @@ export function makeApi(host: Host) {
       return { people, average_best: scored.length > 0 ? scored.reduce((sum, best) => sum + best, 0) / scored.length : null };
     },
 
-    async createCourse(input: { title: string; description?: string; content?: string[]; study_plan?: string[] }): Promise<Course> {
-      return store.createCourse(input);
+    async createCourse(input: { title: string; description?: string; content?: string[]; study_plan?: string[]; local?: boolean }): Promise<Course> {
+      return store.createCourse({ ...input, local: input.local === true });
+    },
+
+    // ---- kept just for the person, and shared with the project (Academy REQ76, REQ80) ----
+
+    // Moves a local quiz, deck, or course into the plugin's folder, the person selected becoming its
+    // creator. Its attempts and sessions stay on this machine as they are: practice, never official.
+    async share(id: string) {
+      const { item } = anything(id);
+      if (!item.local) throw new HostError(409, `${item.title} is already the project's`);
+      const alias = store.me()?.alias;
+      return { ...(await store.moveAcross(item.id, false, alias ?? undefined)), local: false };
+    },
+
+    // Keeps a shared quiz, deck, or course just for the person again, while nobody's history is with it.
+    async keep(id: string) {
+      const { kind, item } = anything(id);
+      if (item.local) throw new HostError(409, `${item.title} is already just yours`);
+      if (!canManage(item, store.access())) throw new HostError(403, `only the ${kind}'s creator and the project's owners keep it just for themselves`);
+      const why = keepWhy(item.id);
+      if (why) throw new HostError(409, `${why}, so it stays with the project`);
+      return { ...(await store.moveAcross(item.id, true, undefined)), local: true };
     },
 
     async updateCourse(id: string, patch: { title?: string; description?: string; content?: string[]; study_plan?: string[]; created_by?: string | null }) {
@@ -705,7 +840,15 @@ export function makeApi(host: Host) {
             ? { id: deck.made_from, title: listed.quizzes.find((quiz) => quiz.id === deck.made_from)!.title }
             : { id: deck.made_from, title: null }
           : null,
-        may: { edit: canEdit(deck, store.access()), manage: canManage(deck, store.access()), study: mayStudy(deck) && studier !== null, shared: studier?.shared ?? false },
+        may: {
+          edit: canEdit(deck, store.access()),
+          manage: canManage(deck, store.access()),
+          study: mayStudy(deck) && studier !== null,
+          // a local deck's sessions stay on this machine whoever is selected (Academy REQ78)
+          shared: !deck.local && (studier?.shared ?? false),
+          keep: !deck.local && canManage(deck, store.access()),
+          keep_why: deck.local ? null : keepWhy(deck.id),
+        },
         progress: deckProgress(deck, mine),
         missed_last: cardsToStudy(deck, mine, 'missed').length,
         standings: Object.fromEntries([...held.entries()]),
@@ -779,6 +922,8 @@ export function makeApi(host: Host) {
       const decks = [...new Set(input.answers.map((answer) => answer.deck))];
       const saved: Review[] = [];
       const results = [];
+      // whether any of it went with the project, or all of it stayed on this machine
+      let keptShared = false;
       for (const id of decks) {
         const deck = store.deck(id);
         if (!mayStudy(deck)) throw new HostError(409, `${deck.title} is closed`);
@@ -797,7 +942,8 @@ export function makeApi(host: Host) {
         } catch (cause) {
           throw new HostError(409, cause instanceof Error ? cause.message : String(cause));
         }
-        await store.saveReview(review, shared);
+        await store.saveReview(review, shared && !deck.local);
+        if (shared && !deck.local) keptShared = true;
         saved.push(review);
         const after = deckProgress(deck, store.reviewsOf(by === LOCAL_PERSON ? null : by, deck.id));
         results.push({ deck: deck.id, title: deck.title, learned: after.learned, gained: after.learned - before.learned, of: after.of, left: after.of - after.learned });
@@ -806,7 +952,7 @@ export function makeApi(host: Host) {
       for (const review of saved) for (const answer of review.answers) finals.set(`${review.deck}/${answer.card.id}`, { deck: review.deck, card: answer.card, got: answer.got });
       const missed = [...finals.values()].filter((held) => !held.got);
       return {
-        shared,
+        shared: keptShared,
         cards: finals.size,
         got: finals.size - missed.length,
         still_learning: missed.length,
@@ -837,7 +983,7 @@ export function makeApi(host: Host) {
       };
     },
 
-    async createDeck(input: { title: string; draws_from?: string[]; course?: string | null; place?: number | null; from_quiz?: string | null }) {
+    async createDeck(input: { title: string; draws_from?: string[]; course?: string | null; place?: number | null; from_quiz?: string | null; local?: boolean }) {
       if (input.course) requireEdit(store.course(input.course), 'a course');
       const quiz = input.from_quiz ? store.quiz(input.from_quiz) : null;
       const taken: string[] = [];
@@ -855,6 +1001,7 @@ export function makeApi(host: Host) {
         rank: input.place ?? null,
         made_from: quiz?.id ?? null,
         cards,
+        ...(typeof input.local === 'boolean' ? { local: input.local } : quiz ? { local: quiz.local } : {}),
       });
     },
 

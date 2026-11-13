@@ -34,6 +34,7 @@ import {
 } from 'eidosmd/page';
 import { asPercent, ContextMenu, Delta, Failed, formatDate, HelpMark, LaptopMark, Loading, Stat, Surface, useAct, useData, UserPill, useTrail, type MenuEntry } from './page-kit.tsx';
 import type { Attempt, AttemptKind, GuestName, AttemptMode, Card, Comparison, Course, CourseProgress, Deck, DeckProgress, GradeMark, MyScores, PersonResult, Quiz, StudyMode } from './model.ts';
+import { dragRow } from './drag.ts';
 import { answerText, blankQuestion, isRight, QUESTION_TYPE_NAMES, QUESTION_TYPES, referenceLink, responseText, type Question, type QuestionType, type Response } from './question.ts';
 
 // ---- what the routes answer ------------------------------------------------------------
@@ -54,6 +55,8 @@ interface Row_ {
   waiting: boolean;
   may_edit: boolean;
   may_manage: boolean;
+  // kept just for the person, on this machine (Academy REQ76)
+  local: boolean;
 }
 interface DeckRow_ {
   id: string;
@@ -73,6 +76,7 @@ interface DeckRow_ {
   last_studied: string | null;
   may_edit: boolean;
   may_manage: boolean;
+  local: boolean;
 }
 interface Overview {
   me: { name: string; alias: string | null; owner: boolean } | null;
@@ -80,7 +84,7 @@ interface Overview {
   quizzes: Row_[];
   decks: DeckRow_[];
   quizzes_left: { folder: string | null; quizzes: number; results: number; may_move: boolean } | null;
-  courses: Array<{ id: string; title: string; created_by: string | null; enrolled: boolean; may_edit: boolean }>;
+  courses: Array<{ id: string; title: string; created_by: string | null; enrolled: boolean; may_edit: boolean; local: boolean }>;
 }
 interface QuizView {
   quiz: Quiz;
@@ -90,7 +94,7 @@ interface QuizView {
   course: { id: string; title: string } | null;
   place: number | null;
   of: number;
-  may: { edit: boolean; manage: boolean; results: boolean; take_official: boolean; official_why: string | null };
+  may: { edit: boolean; manage: boolean; results: boolean; take_official: boolean; official_why: string | null; keep: boolean; keep_why: string | null };
   scores: MyScores;
   practice: { missed: string[]; unseen: string[] };
   whole_quiz: string[];
@@ -107,7 +111,7 @@ interface Pickable {
 interface CourseView {
   course: Course;
   created_by_name: string | null;
-  may: { edit: boolean; people: boolean; enroll: boolean; enroll_why: string | null };
+  may: { edit: boolean; people: boolean; enroll: boolean; enroll_why: string | null; keep: boolean; keep_why: string | null };
   enrolled_since: string | null;
   enrolled_people: number;
   people: Array<{ alias: string; name: string }>;
@@ -121,7 +125,8 @@ interface CourseView {
 interface ProgressView {
   person: { alias: string; name: string };
   mine: boolean;
-  enrolled_since: string;
+  // null for a local course, which follows the person without enrolling
+  enrolled_since: string | null;
   progress: CourseProgress;
   sessions_done: number;
   sessions: number;
@@ -163,7 +168,7 @@ interface DeckView {
   place: number | null;
   of: number;
   made_from: { id: string; title: string | null } | null;
-  may: { edit: boolean; manage: boolean; study: boolean; shared: boolean };
+  may: { edit: boolean; manage: boolean; study: boolean; shared: boolean; keep: boolean; keep_why: string | null };
   progress: DeckProgress;
   missed_last: number;
   standings: Record<string, Standing>;
@@ -215,6 +220,72 @@ function Link({ to, className, children, ...rest }: { to: string; className?: st
     >
       {children}
     </a>
+  );
+}
+
+// ---- kept just for the person, and shared with the project (Academy REQ76, REQ80) ----
+
+type Act = (title: string, work: () => Promise<unknown>) => Promise<boolean>;
+
+const AGAIN = 'You can make it just yours again until someone else takes it officially, studies it, enrolls, or answers it from a public link.';
+
+// Shares a quiz, a deck, or a course kept just for the person with the project, once they agree.
+async function shareWithProject(host: PluginHost, act: Act, thing: { kind: 'quiz' | 'deck' | 'course'; id: string; title: string; course?: string | null; holds?: number }): Promise<boolean> {
+  const left = thing.course ? ` It leaves ${thing.course}, which stays just yours.` : '';
+  const words =
+    thing.kind === 'course'
+      ? `Everyone in the project will see ${thing.title} and the ${thing.holds ?? 0} quizzes and decks in it, and you become their creator. Your attempts and study sessions stay on this machine as practice: they are not posted as official scores.`
+      : thing.kind === 'quiz'
+        ? `Everyone in the project will see ${thing.title} and can take it, and you become its creator. Your attempts stay on this machine as practice: they are not posted as official scores.${left}`
+        : `Everyone in the project will see ${thing.title} and can study it, and you become its creator. Your study sessions with it stay on this machine.${left}`;
+  if (!(await host.dialog.confirm(`${words} ${AGAIN}`, { title: 'Share with the project', ok: 'Share with the project' }))) return false;
+  return act(`Could not share the ${thing.kind}`, () => host.post(`share-with-project?id=${Q(thing.id)}`));
+}
+
+// Keeps a shared quiz, deck, or course just for the person again; the server says why not when someone's history is with it.
+async function keepJustForMe(host: PluginHost, act: Act, thing: { kind: 'quiz' | 'deck' | 'course'; id: string; title: string }): Promise<boolean> {
+  const words = `${thing.title} leaves the project: nobody else will see it, and it is kept only on this machine, never committed or synced.`;
+  if (!(await host.dialog.confirm(words, { title: 'Keep it just for me', ok: 'Keep it just for me' }))) return false;
+  return act(`Could not keep the ${thing.kind} just for you`, () => host.post(`keep-just-for-me?id=${Q(thing.id)}`));
+}
+
+// A page header's ⋯: what a quiz, a deck, or a course offers beyond its buttons, opened under it.
+function HeadMenu({ items }: { items: MenuEntry[] }): JSX.Element | null {
+  const [at, setAt] = useState<{ x: number; y: number } | null>(null);
+  if (items.length === 0) return null;
+  return (
+    <>
+      <Button
+        size="sm"
+        aria-label="More"
+        title="More"
+        onClick={(event: { currentTarget: HTMLElement }) => {
+          const box = event.currentTarget.getBoundingClientRect();
+          setAt({ x: box.right - 240, y: box.bottom + 4 });
+        }}
+      >
+        ⋯
+      </Button>
+      {at && <ContextMenu x={at.x} y={at.y} items={items} onClose={() => setAt(null)} />}
+    </>
+  );
+}
+
+// The chip above a local quiz's, deck's, or course's name, saying where it lives (Academy REQ81).
+function LocalChip(): JSX.Element {
+  return (
+    <span className="qz-eyebrow qz-chip-local">
+      <LaptopMark /> Just for you · on this machine
+    </span>
+  );
+}
+
+// The laptop beside something kept just for the person, wherever it is listed (Academy REQ81).
+function LocalMark(): JSX.Element {
+  return (
+    <span className="qz-local-mark" title="Just yours, kept on this machine">
+      <LaptopMark />
+    </span>
   );
 }
 
@@ -357,16 +428,31 @@ function Sidebar(): JSX.Element {
       if (next && next.trim() && next !== title) await act(`Could not rename the ${what}`, () => host.put(route, { title: next }));
     },
   });
+  // Share with the project on what is just the person's, Keep it just for me on what its holder may take back
+  const across = (kind: 'quiz' | 'deck' | 'course', row: { id: string; title: string; local: boolean; course?: string | null }, manage: boolean): MenuEntry[] => {
+    if (row.local) {
+      const course = row.course ? (courses.find((held) => held.id === row.course)?.title ?? null) : null;
+      const holds = kind === 'course' ? quizzes.filter((held) => held.course === row.id).length + decks.filter((held) => held.course === row.id).length : 0;
+      return [{ label: 'Share with the project', run: () => void shareWithProject(host, act, { kind, id: row.id, title: row.title, course, holds }) }];
+    }
+    return manage ? [{ label: 'Keep it just for me', run: () => void keepJustForMe(host, act, { kind, id: row.id, title: row.title }) }] : [];
+  };
+  const gone = (title: string, local: boolean, stays: string): string => (local ? `Delete ${title}? It is kept only on this machine, so it can't be brought back.` : `Delete ${title}? ${stays}`);
   const courseMenu = (course: Overview['courses'][number]): MenuEntry[] => {
     const page = pageHref(host, `course/${Q(course.id)}`);
     return [
       go('Open', page),
-      ...(course.enrolled ? [go('My progress', `${page}/progress`)] : []),
-      ...(course.may_edit ? [go('Enrolled', `${page}/people`)] : []),
+      ...(course.enrolled || course.local ? [go('My progress', `${page}/progress`)] : []),
+      ...(course.may_edit && !course.local ? [go('Enrolled', `${page}/people`)] : []),
       copyId(course.id),
-      course.enrolled
-        ? { label: 'Leave course', run: () => void act('Could not leave the course', () => host.del(`course/enroll?id=${Q(course.id)}`)) }
-        : { label: 'Enroll', run: () => void act('Could not enroll', () => host.post(`course/enroll?id=${Q(course.id)}`)) },
+      ...(course.local
+        ? []
+        : [
+            course.enrolled
+              ? { label: 'Leave course', run: () => void act('Could not leave the course', () => host.del(`course/enroll?id=${Q(course.id)}`)) }
+              : { label: 'Enroll', run: () => void act('Could not enroll', () => host.post(`course/enroll?id=${Q(course.id)}`)) },
+          ]),
+      ...across('course', course, course.may_edit),
       ...(course.may_edit
         ? [
             rename('course', course.title, `course?id=${Q(course.id)}`),
@@ -377,7 +463,13 @@ function Sidebar(): JSX.Element {
               run: async () => {
                 const held = quizzes.filter((row) => row.course === course.id).length;
                 const decksIn = decks.filter((row) => row.course === course.id).length;
-                if (await host.dialog.confirm(`Delete ${course.title}? Its ${held} quizzes and ${decksIn} decks stay, as one-offs.`, { title: 'Delete course', ok: 'Delete', danger: true })) {
+                if (
+                  await host.dialog.confirm(`Delete ${course.title}? Its ${held} quizzes and ${decksIn} decks stay, as one-offs${course.local ? ' kept just for you' : ''}.`, {
+                    title: 'Delete course',
+                    ok: 'Delete',
+                    danger: true,
+                  })
+                ) {
                   await act('Could not delete the course', () => host.del(`course?id=${Q(course.id)}`));
                 }
               },
@@ -392,8 +484,11 @@ function Sidebar(): JSX.Element {
     const canPractice = row.questions > 0 && (row.status === 'open' || row.may_edit);
     return [
       go('Open', page),
-      ...(row.status === 'open' ? [go('Take officially', `${take}?kind=official&mode=whole`)] : []),
-      ...(canPractice ? [go('Practice', `${take}?kind=practice&mode=whole`)] : []),
+      ...(row.local
+        ? canPractice
+          ? [go('Take quiz', `${take}?kind=practice&mode=whole`)]
+          : []
+        : [...(row.status === 'open' ? [go('Take officially', `${take}?kind=official&mode=whole`)] : []), ...(canPractice ? [go('Practice', `${take}?kind=practice&mode=whole`)] : [])]),
       ...(row.may_edit ? [go('Questions', `${page}/questions`)] : []),
       copyId(row.id),
       ...(row.may_edit && row.questions > 0
@@ -404,6 +499,7 @@ function Sidebar(): JSX.Element {
             },
           ]
         : []),
+      ...across('quiz', row, row.may_manage),
       ...(row.may_edit ? [rename('quiz', row.title, `quiz?id=${Q(row.id)}`)] : []),
       ...(row.may_manage
         ? [
@@ -412,7 +508,7 @@ function Sidebar(): JSX.Element {
               danger: true,
               rule: true,
               run: async () => {
-                if (await host.dialog.confirm(`Delete ${row.title}? The results people already have stay in their history.`, { title: 'Delete quiz', ok: 'Delete', danger: true })) {
+                if (await host.dialog.confirm(gone(row.title, row.local, 'The results people already have stay in their history.'), { title: 'Delete quiz', ok: 'Delete', danger: true })) {
                   await act('Could not delete the quiz', () => host.del(`quiz?id=${Q(row.id)}`));
                 }
               },
@@ -436,6 +532,7 @@ function Sidebar(): JSX.Element {
             },
           ]
         : []),
+      ...across('deck', row, row.may_manage),
       ...(row.may_edit ? [rename('deck', row.title, `deck?id=${Q(row.id)}`)] : []),
       ...(row.may_manage
         ? [
@@ -444,7 +541,7 @@ function Sidebar(): JSX.Element {
               danger: true,
               rule: true,
               run: async () => {
-                if (await host.dialog.confirm(`Delete ${row.title}? People's study sessions with it stay in their history.`, { title: 'Delete deck', ok: 'Delete', danger: true })) {
+                if (await host.dialog.confirm(gone(row.title, row.local, "People's study sessions with it stay in their history."), { title: 'Delete deck', ok: 'Delete', danger: true })) {
                   await act('Could not delete the deck', () => host.del(`deck?id=${Q(row.id)}`));
                 }
               },
@@ -453,7 +550,7 @@ function Sidebar(): JSX.Element {
         : []),
     ];
   };
-  const entry = (label: string, to: string, items: MenuEntry[], count?: number | string): JSX.Element => (
+  const entry = (label: string, to: string, items: MenuEntry[], count?: number | string, local = false): JSX.Element => (
     <NavLink
       key={to}
       href={to}
@@ -465,6 +562,7 @@ function Sidebar(): JSX.Element {
       }}
     >
       {label}
+      {local && <LocalMark />}
       {count !== undefined && <NavCount>{count}</NavCount>}
     </NavLink>
   );
@@ -506,13 +604,14 @@ function Sidebar(): JSX.Element {
                 course.title,
                 pageHref(host, `course/${Q(course.id)}`),
                 courseMenu(course),
-                course.enrolled ? `${inCourse.filter((row) => row.best !== null).length}/${inCourse.length}` : inCourse.length + decksIn,
+                course.enrolled || course.local ? `${inCourse.filter((row) => row.best !== null).length}/${inCourse.length}` : inCourse.length + decksIn,
+                course.local,
               );
             })}
             {group('Quizzes', 'quiz')}
-            {quizzes.filter((row) => row.course === null).map((row) => entry(row.title, pageHref(host, `quiz/${Q(row.id)}`), quizMenu(row)))}
+            {quizzes.filter((row) => row.course === null).map((row) => entry(row.title, pageHref(host, `quiz/${Q(row.id)}`), quizMenu(row), undefined, row.local))}
             {group('Decks', 'deck')}
-            {decks.filter((row) => row.course === null).map((row) => entry(row.title, pageHref(host, `deck/${Q(row.id)}`), deckMenu(row)))}
+            {decks.filter((row) => row.course === null).map((row) => entry(row.title, pageHref(host, `deck/${Q(row.id)}`), deckMenu(row), undefined, row.local))}
           </>
         )}
       </Nav>
@@ -545,6 +644,7 @@ interface ListRow {
   // what the person has: their best on a quiz, the share of a deck they have learned
   you: number;
   you_label: string | null;
+  local: boolean;
 }
 
 // What a quiz shows a person who has no settled score on it yet but has an answer waiting for a grade.
@@ -831,6 +931,16 @@ function QuizList({ show }: { show: string | null }): JSX.Element {
                         <Badge>Deck</Badge>
                       </>
                     )}
+                    {row.local && (
+                      <>
+                        {' '}
+                        <Badge>
+                          <span className="qz-chip-local">
+                            <LaptopMark /> Local
+                          </span>
+                        </Badge>
+                      </>
+                    )}
                     {row.status === 'closed' && (
                       <>
                         {' '}
@@ -936,18 +1046,92 @@ function DrawsFrom({ sources, onChange, picks }: { sources: string[]; onChange: 
   );
 }
 
-export function NewQuiz({ onClose, courses, draws, course: startCourse }: { onClose: () => void; courses: Array<{ id: string; title: string }>; draws: string[]; course: string | null }): JSX.Element {
+// Who a new quiz, deck, or course is for (Academy REQ76): the project, picked already, or just the person,
+// kept on this machine. Its words say what nobody else will see of it.
+function WhoFor({ local, onChange, what }: { local: boolean; onChange: (local: boolean) => void; what: 'quiz' | 'deck' | 'course' }): JSX.Element {
+  const unseen = what === 'quiz' ? 'it or your scores' : what === 'deck' ? 'it or where you stand in it' : 'it or your progress';
+  return (
+    <div>
+      <span className="qz-label">Who is it for</span>
+      <Seg>
+        <SegItem active={!local} selected={!local} onClick={() => onChange(false)}>
+          The project
+        </SegItem>
+        <SegItem active={local} selected={local} onClick={() => onChange(true)}>
+          <span className="qz-chip-local">
+            <LaptopMark /> Just me
+          </span>
+        </SegItem>
+      </Seg>
+      {local && (
+        <Text tone="faint" size="sm" block>
+          Kept on this machine only. Nobody else sees {unseen}. You can share it with the project later.
+        </Text>
+      )}
+    </div>
+  );
+}
+
+// The courses a new quiz or deck may go in: a course and what is in it are all the person's or all the project's (Academy REQ79).
+function CoursePick({
+  courses,
+  local,
+  value,
+  onChange,
+}: {
+  courses: Array<{ id: string; title: string; local?: boolean }>;
+  local: boolean;
+  value: string;
+  onChange: (course: string) => void;
+}): JSX.Element {
+  const offered = courses.filter((held) => Boolean(held.local) === local);
+  return (
+    <div>
+      <span className="qz-label">Course (optional)</span>
+      <Select aria-label="Course" value={value} onChange={(event: { target: HTMLSelectElement }) => onChange(event.target.value)}>
+        <option value="">-</option>
+        {offered.map((held) => (
+          <option key={held.id} value={held.id}>
+            {held.title}
+          </option>
+        ))}
+      </Select>
+      {local && (
+        <Text tone="faint" size="sm" block>
+          Just your local courses: a course and its quizzes are either all yours or all the project's.
+        </Text>
+      )}
+    </div>
+  );
+}
+
+export function NewQuiz({
+  onClose,
+  courses,
+  draws,
+  course: startCourse,
+}: {
+  onClose: () => void;
+  courses: Array<{ id: string; title: string; local?: boolean }>;
+  draws: string[];
+  course: string | null;
+}): JSX.Element {
   const host = usePluginHost();
   const act = useAct();
   const { data: picks } = useData<Pickable>('pickable');
   const [title, setTitle] = useState('');
   const [course, setCourse] = useState(startCourse ?? '');
+  const [local, setLocal] = useState(Boolean(courses.find((held) => held.id === startCourse)?.local));
+  const choose = (next: boolean): void => {
+    setLocal(next);
+    if (course && Boolean(courses.find((held) => held.id === course)?.local) !== next) setCourse('');
+  };
   const [sources, setSources] = useState<string[]>(draws);
   const [start, setStart] = useState<'generate' | 'write'>('generate');
   const [count, setCount] = useState('20');
   const create = async (): Promise<void> => {
     await act('Could not create the quiz', async () => {
-      const quiz = await host.post<Quiz>('quiz', { title, draws_from: sources, course: course || null });
+      const quiz = await host.post<Quiz>('quiz', { title, draws_from: sources, course: course || null, local });
       onClose();
       host.navigate(`${pageHref(host, `quiz/${Q(quiz.id)}/questions`)}${start === 'generate' ? `?generate=${Q(count)}` : ''}`);
     });
@@ -970,17 +1154,8 @@ export function NewQuiz({ onClose, courses, draws, course: startCourse }: { onCl
           <span className="qz-label">Title</span>
           <Input autoFocus value={title} onChange={(event: { target: HTMLInputElement }) => setTitle(event.target.value)} />
         </label>
-        <div>
-          <span className="qz-label">Course (optional)</span>
-          <Select aria-label="Course" value={course} onChange={(event: { target: HTMLSelectElement }) => setCourse(event.target.value)}>
-            <option value="">-</option>
-            {courses.map((held) => (
-              <option key={held.id} value={held.id}>
-                {held.title}
-              </option>
-            ))}
-          </Select>
-        </div>
+        <WhoFor local={local} onChange={choose} what="quiz" />
+        <CoursePick courses={courses} local={local} value={course} onChange={setCourse} />
         <div>
           <span className="qz-label">Draws from</span>
           <DrawsFrom sources={sources} onChange={setSources} picks={picks} />
@@ -1016,8 +1191,8 @@ export function NewDeck({
   fromQuiz,
 }: {
   onClose: () => void;
-  courses: Array<{ id: string; title: string }>;
-  quizzes: Array<{ id: string; title: string; questions: number }>;
+  courses: Array<{ id: string; title: string; local?: boolean }>;
+  quizzes: Array<{ id: string; title: string; questions: number; local?: boolean }>;
   draws: string[];
   course: string | null;
   fromQuiz: string | null;
@@ -1033,9 +1208,15 @@ export function NewDeck({
   const [start, setStart] = useState<'generate' | 'quiz' | 'write'>(fromQuiz ? 'quiz' : hasAgent ? 'generate' : 'write');
   const [quiz, setQuiz] = useState(fromQuiz ?? withQuestions[0]?.id ?? '');
   const [count, setCount] = useState('20');
+  // a deck made from a quiz kept just for the person starts as theirs too
+  const [local, setLocal] = useState(Boolean(courses.find((held) => held.id === startCourse)?.local ?? quizzes.find((held) => held.id === fromQuiz)?.local));
+  const choose = (next: boolean): void => {
+    setLocal(next);
+    if (course && Boolean(courses.find((held) => held.id === course)?.local) !== next) setCourse('');
+  };
   const create = async (): Promise<void> => {
     await act('Could not create the deck', async () => {
-      const made = await host.post<Deck>('deck', { title, draws_from: sources, course: course || null, from_quiz: start === 'quiz' ? quiz : null });
+      const made = await host.post<Deck>('deck', { title, draws_from: sources, course: course || null, from_quiz: start === 'quiz' ? quiz : null, local });
       onClose();
       host.navigate(start === 'quiz' ? pageHref(host, `deck/${Q(made.id)}`) : `${pageHref(host, `deck/${Q(made.id)}/cards`)}${start === 'generate' ? `?generate=${Q(count)}` : ''}`);
     });
@@ -1058,17 +1239,8 @@ export function NewDeck({
           <span className="qz-label">Title</span>
           <Input autoFocus value={title} onChange={(event: { target: HTMLInputElement }) => setTitle(event.target.value)} />
         </label>
-        <div>
-          <span className="qz-label">Course (optional)</span>
-          <Select aria-label="Course" value={course} onChange={(event: { target: HTMLSelectElement }) => setCourse(event.target.value)}>
-            <option value="">-</option>
-            {courses.map((held) => (
-              <option key={held.id} value={held.id}>
-                {held.title}
-              </option>
-            ))}
-          </Select>
-        </div>
+        <WhoFor local={local} onChange={choose} what="deck" />
+        <CoursePick courses={courses} local={local} value={course} onChange={setCourse} />
         <div>
           <span className="qz-label">Draws from</span>
           <DrawsFrom sources={sources} onChange={setSources} picks={picks} />
@@ -1118,9 +1290,10 @@ function NewCourse({ onClose }: { onClose: () => void }): JSX.Element {
   const act = useAct();
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
+  const [local, setLocal] = useState(false);
   const create = async (): Promise<void> => {
     await act('Could not create the course', async () => {
-      const course = await host.post<Course>('course', { title, description });
+      const course = await host.post<Course>('course', { title, description, local });
       onClose();
       host.navigate(pageHref(host, `course/${Q(course.id)}`));
     });
@@ -1143,6 +1316,7 @@ function NewCourse({ onClose }: { onClose: () => void }): JSX.Element {
           <span className="qz-label">Title</span>
           <Input autoFocus value={title} onChange={(event: { target: HTMLInputElement }) => setTitle(event.target.value)} />
         </label>
+        <WhoFor local={local} onChange={setLocal} what="course" />
         <label>
           <span className="qz-label">Description (optional)</span>
           <Textarea rows={3} value={description} onChange={(event: { target: HTMLTextAreaElement }) => setDescription(event.target.value)} />
@@ -1186,6 +1360,7 @@ function GetStarted(): JSX.Element {
   const [way, setWay] = useState<'generate' | 'write'>(hasAgent ? 'generate' : 'write');
   const [count, setCount] = useState('20');
   const [madeCourse, setMadeCourse] = useState<string | null>(null);
+  const [local, setLocal] = useState(false);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
   useTrail([{ label: 'Academy', href: pageHref(host, '') }, { label: 'Get started' }]);
@@ -1204,10 +1379,11 @@ function GetStarted(): JSX.Element {
       // a retry after the quiz failed does not make the course twice
       let course = making === 'course' ? madeCourse : null;
       if (making === 'course' && course === null) {
-        course = (await host.post<Course>('course', { title: courseTitle, description })).id;
+        course = (await host.post<Course>('course', { title: courseTitle, description, local })).id;
         setMadeCourse(course);
       }
-      const made = making === 'deck' ? await host.post<Deck>('deck', { title, draws_from: sources, course: null }) : await host.post<Quiz>('quiz', { title, draws_from: sources, course });
+      const made =
+        making === 'deck' ? await host.post<Deck>('deck', { title, draws_from: sources, course: null, local }) : await host.post<Quiz>('quiz', { title, draws_from: sources, course, local });
       const asks = new URLSearchParams({ made: made.id, ...(making === 'deck' ? { kind: 'deck' } : {}), ...(course ? { course } : {}), ...(way === 'generate' ? { generate: count } : {}) });
       host.navigate(`${pageHref(host, 'start')}?${asks.toString()}`);
     } catch (cause) {
@@ -1243,6 +1419,7 @@ function GetStarted(): JSX.Element {
               <Tile checked={making === 'course'} name="A course" hint="Quizzes and decks in order. People enroll and follow their progress across them." onClick={() => setMaking('course')} />
             </div>
           )}
+          {screen === 'what' && <WhoFor local={local} onChange={setLocal} what={making} />}
           {screen === 'name' && (
             <Stack gap="md">
               {making === 'course' && (
@@ -1472,12 +1649,12 @@ function ProgressDetail({ course, person }: { course: string; person: string | n
         </div>
       )}
       <div className="qz-stats">
-        <Stat hero label="Progress" value={`${progress.taken} of ${progress.of}`} sub="Quizzes taken officially" />
+        <Stat hero label="Progress" value={`${progress.taken} of ${progress.of}`} sub={data.enrolled_since === null ? 'Quizzes taken' : 'Quizzes taken officially'} />
         <Stat label="Average best" value={asPercent(progress.average_best)} sub="Across quizzes taken" />
         <Stat
           label="Last taken"
           value={<span style={{ fontSize: 26 }}>{formatDate(progress.last_taken)}</span>}
-          sub={data.mine ? `Enrolled ${formatDate(data.enrolled_since)}` : 'An official attempt'}
+          sub={data.enrolled_since === null ? 'On this machine' : data.mine ? `Enrolled ${formatDate(data.enrolled_since)}` : 'An official attempt'}
         />
         {data.sessions > 0 && <Stat label="Study plan" value={`${data.sessions_done} of ${data.sessions}`} sub="Sessions done" />}
       </div>
@@ -1737,7 +1914,14 @@ function CoursePage({ id, tab, person }: { id: string; tab: string; person: stri
       reload();
     });
   };
-  const enrolled = data.enrolled_since !== null;
+  // a course kept just for the person follows them without enrolling (Academy REQ79)
+  const enrolled = data.enrolled_since !== null || course.local;
+  const share = async (): Promise<void> => {
+    if (await shareWithProject(host, act, { kind: 'course', id: course.id, title: course.title, holds: quizzes.length + decks.length })) reload();
+  };
+  const keep = async (): Promise<void> => {
+    if (await keepJustForMe(host, act, { kind: 'course', id: course.id, title: course.title })) reload();
+  };
   const tabs: Array<{ name: string; label: string; show: boolean }> = [
     { name: '', label: decks.length > 0 ? 'Quizzes and decks' : 'Quizzes', show: true },
     { name: 'progress', label: 'My progress', show: enrolled },
@@ -1745,8 +1929,8 @@ function CoursePage({ id, tab, person }: { id: string; tab: string; person: stri
   ];
   const active = tabs.find((held) => held.name === tab && held.show)?.name ?? '';
   const remove = async (): Promise<void> => {
-    if (!(await host.dialog.confirm(`Delete ${course.title}? Its ${quizzes.length} quizzes and ${decks.length} decks stay, as one-offs.`, { title: 'Delete course', ok: 'Delete', danger: true })))
-      return;
+    const words = `Delete ${course.title}? Its ${quizzes.length} quizzes and ${decks.length} decks stay, as one-offs${course.local ? ' kept just for you' : ''}.`;
+    if (!(await host.dialog.confirm(words, { title: 'Delete course', ok: 'Delete', danger: true }))) return;
     await act('Could not delete the course', async () => {
       await host.del(`course?id=${Q(id)}`);
       host.navigate(pageHref(host, ''));
@@ -1756,14 +1940,14 @@ function CoursePage({ id, tab, person }: { id: string; tab: string; person: stri
     <Surface>
       <Page>
         <div className="qz">
-          <span className="qz-eyebrow">Course</span>
+          {course.local ? <LocalChip /> : <span className="qz-eyebrow">Course</span>}
           <div className="qz-row" style={{ alignItems: 'flex-start' }}>
             <div style={{ flex: '1 1 400px', minWidth: 0 }}>
               <InlineText className="qz-h1" as="h1" label="The course's name" value={course.title} editable={data.may.edit} onSave={(title) => title.trim() !== '' && patch({ title })} />
             </div>
             <span className="qz-head-actions">
-              {enrolled && <span className="qz-badge good">Enrolled</span>}
-              {enrolled && (
+              {enrolled && !course.local && <span className="qz-badge good">Enrolled</span>}
+              {enrolled && !course.local && (
                 <Button size="sm" variant="quiet" onClick={leave}>
                   Leave course
                 </Button>
@@ -1776,10 +1960,25 @@ function CoursePage({ id, tab, person }: { id: string; tab: string; person: stri
                   <button className="qz-btn secondary" onClick={() => setAdding('deck')}>
                     Add deck
                   </button>
-                  <Button size="sm" variant="quiet" onClick={remove}>
-                    Delete
-                  </Button>
                 </>
+              )}
+              {course.local && (
+                <Button size="sm" onClick={share}>
+                  Share with the project
+                </Button>
+              )}
+              {course.local && data.may.edit && (
+                <Button size="sm" variant="quiet" onClick={remove}>
+                  Delete
+                </Button>
+              )}
+              {!course.local && (data.may.edit || data.may.keep) && (
+                <HeadMenu
+                  items={[
+                    ...(data.may.keep ? [{ label: 'Keep it just for me', run: keep, ...(data.may.keep_why ? { disabled: `${data.may.keep_why}, so it stays with the project.` } : {}) }] : []),
+                    ...(data.may.edit ? [{ label: 'Delete', run: remove, danger: true, rule: data.may.keep }] : []),
+                  ]}
+                />
               )}
             </span>
           </div>
@@ -1809,26 +2008,30 @@ function CoursePage({ id, tab, person }: { id: string; tab: string; person: stri
                 />
               )}
             </dd>
-            <dt>Created by</dt>
-            <dd>
-              {course.created_by ? <UserPill alias={course.created_by} name={data.created_by_name} /> : <Text tone="faint">Unknown</Text>}
-              {data.may.edit && (
-                <span className="qz-add">
-                  <Select aria-label="Change who created it" value="" onChange={(event: { target: HTMLSelectElement }) => event.target.value && patch({ created_by: event.target.value })}>
-                    <option value="" hidden>
-                      {course.created_by ? 'Change…' : 'Set creator…'}
-                    </option>
-                    {data.people
-                      .filter((person) => person.alias !== course.created_by)
-                      .map((person) => (
-                        <option key={person.alias} value={person.alias}>
-                          {person.name} (@{person.alias})
+            {!course.local && (
+              <>
+                <dt>Created by</dt>
+                <dd>
+                  {course.created_by ? <UserPill alias={course.created_by} name={data.created_by_name} /> : <Text tone="faint">Unknown</Text>}
+                  {data.may.edit && (
+                    <span className="qz-add">
+                      <Select aria-label="Change who created it" value="" onChange={(event: { target: HTMLSelectElement }) => event.target.value && patch({ created_by: event.target.value })}>
+                        <option value="" hidden>
+                          {course.created_by ? 'Change…' : 'Set creator…'}
                         </option>
-                      ))}
-                  </Select>
-                </span>
-              )}
-            </dd>
+                        {data.people
+                          .filter((person) => person.alias !== course.created_by)
+                          .map((person) => (
+                            <option key={person.alias} value={person.alias}>
+                              {person.name} (@{person.alias})
+                            </option>
+                          ))}
+                      </Select>
+                    </span>
+                  )}
+                </dd>
+              </>
+            )}
           </dl>
           {tabs.filter((held) => held.show).length > 1 && (
             <nav className="qz-tabs">
@@ -1976,11 +2179,11 @@ function CoursePage({ id, tab, person }: { id: string; tab: string; person: stri
           )}
         </div>
       </Page>
-      {adding === 'quiz' && <NewQuiz onClose={() => setAdding(null)} courses={overview?.courses ?? [{ id: course.id, title: course.title }]} draws={[]} course={course.id} />}
+      {adding === 'quiz' && <NewQuiz onClose={() => setAdding(null)} courses={overview?.courses ?? [{ id: course.id, title: course.title, local: course.local }]} draws={[]} course={course.id} />}
       {adding === 'deck' && (
         <NewDeck
           onClose={() => setAdding(null)}
-          courses={overview?.courses ?? [{ id: course.id, title: course.title }]}
+          courses={overview?.courses ?? [{ id: course.id, title: course.title, local: course.local }]}
           quizzes={overview?.quizzes ?? []}
           draws={[]}
           course={course.id}
@@ -2106,21 +2309,63 @@ function MyScoresTab({ view }: { view: QuizView }): JSX.Element {
   const { scores, practice, quiz, askable } = view;
   const [reviewing, setReviewing] = useState<string | null>(null);
   const take = (kind: AttemptKind, mode: AttemptMode): string => `${pageHref(host, `take/${Q(quiz.id)}`)}?kind=${kind}&mode=${mode}`;
+  // a quiz kept just for the person has one way in, and its whole attempts are its scores (Academy REQ77)
+  const own = quiz.local ? '' : ' official';
+  const retries = (
+    <>
+      {practice.missed.length > 0 ? (
+        <Link className="qz-btn secondary" to={take('practice', 'missed')}>
+          Retry missed ({practice.missed.length})
+        </Link>
+      ) : (
+        <button className="qz-btn secondary" disabled>
+          Retry missed (0)
+        </button>
+      )}
+      {practice.unseen.length > 0 ? (
+        <Link className="qz-btn secondary" to={take('practice', 'unseen')}>
+          Not yet seen ({practice.unseen.length})
+        </Link>
+      ) : (
+        <button className="qz-btn secondary" disabled>
+          Not yet seen (0)
+        </button>
+      )}
+    </>
+  );
   return (
     <>
       {scores.official_attempts > 0 && (
         <div className="qz-stats">
-          <Stat hero label="Best official" value={asPercent(scores.best?.percent)} sub={`${scores.best?.score} of ${scores.best?.total}, ${formatDate(scores.best?.completed_at)}`} />
+          <Stat hero label={`Best${own}`} value={asPercent(scores.best?.percent)} sub={`${scores.best?.score} of ${scores.best?.total}, ${formatDate(scores.best?.completed_at)}`} />
           <Stat
-            label="Latest official"
+            label={`Latest${own}`}
             value={asPercent(scores.latest?.percent)}
-            sub={scores.latest?.change === null ? 'Your first official attempt' : <Delta change={scores.latest?.change} suffix="vs your last try" />}
+            sub={scores.latest?.change === null ? quiz.local ? 'Your first time through' : 'Your first official attempt' : <Delta change={scores.latest?.change} suffix="vs your last try" />}
           />
-          <Stat label="Official attempts" value={scores.official_attempts} sub={`Since ${formatDate(scores.first_official)}`} />
+          <Stat label={quiz.local ? 'Attempts' : 'Official attempts'} value={scores.official_attempts} sub={`Since ${formatDate(scores.first_official)}`} />
         </div>
       )}
       {askable === 0 ? (
         <Empty>This quiz has no questions yet.</Empty>
+      ) : quiz.local ? (
+        <div className="qz-card">
+          <div className="qz-row">
+            <strong>Take the quiz</strong>
+            <span className="qz-badge">
+              <LaptopMark /> Local
+            </span>
+          </div>
+          <div className="qz-muted qz-small" style={{ marginTop: 4 }}>
+            Your attempts stay on this machine and count in your scores here. Nobody else sees them.
+          </div>
+          <div className="qz-actions">
+            <Link className="qz-btn" to={take('practice', 'whole')}>
+              Take quiz
+            </Link>
+            {retries}
+          </div>
+        </div>
       ) : quiz.status === 'closed' && !view.may.edit ? (
         <Empty>This quiz is closed. You can take it once it opens.</Empty>
       ) : (
@@ -2159,24 +2404,7 @@ function MyScoresTab({ view }: { view: QuizView }): JSX.Element {
               <Link className="qz-btn secondary" to={take('practice', 'whole')}>
                 Whole quiz
               </Link>
-              {practice.missed.length > 0 ? (
-                <Link className="qz-btn secondary" to={take('practice', 'missed')}>
-                  Retry missed ({practice.missed.length})
-                </Link>
-              ) : (
-                <button className="qz-btn secondary" disabled>
-                  Retry missed (0)
-                </button>
-              )}
-              {practice.unseen.length > 0 ? (
-                <Link className="qz-btn secondary" to={take('practice', 'unseen')}>
-                  Not yet seen ({practice.unseen.length})
-                </Link>
-              ) : (
-                <button className="qz-btn secondary" disabled>
-                  Not yet seen (0)
-                </button>
-              )}
+              {retries}
             </div>
           </div>
         </div>
@@ -2203,7 +2431,9 @@ function MyScoresTab({ view }: { view: QuizView }): JSX.Element {
               <tr key={attempt.id}>
                 <td>{formatDate(attempt.completed_at)}</td>
                 <td>
-                  {attempt.kind === 'official' ? (
+                  {quiz.local ? (
+                    `The ${modeWords[attempt.mode]}`
+                  ) : attempt.kind === 'official' ? (
                     'Official'
                   ) : (
                     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
@@ -2230,7 +2460,7 @@ function MyScoresTab({ view }: { view: QuizView }): JSX.Element {
             {scores.history.length === 0 && (
               <tr>
                 <td colSpan={4}>
-                  <Text tone="muted">No attempts yet. Take the quiz, or practice first.</Text>
+                  <Text tone="muted">{quiz.local ? 'No attempts yet.' : 'No attempts yet. Take the quiz, or practice first.'}</Text>
                 </td>
               </tr>
             )}
@@ -3435,15 +3665,25 @@ function QuizPage({ id, tab, generate }: { id: string; tab: string; generate: st
     });
   };
   const remove = async (): Promise<void> => {
-    if (!(await host.dialog.confirm(`Delete ${quiz.title}? The results people already have stay in their history.`, { title: 'Delete quiz', ok: 'Delete', danger: true }))) return;
+    const words = quiz.local ? `Delete ${quiz.title}? It is kept only on this machine, so it can't be brought back.` : `Delete ${quiz.title}? The results people already have stay in their history.`;
+    if (!(await host.dialog.confirm(words, { title: 'Delete quiz', ok: 'Delete', danger: true }))) return;
     await act('Could not delete the quiz', async () => {
       await host.del(`quiz?id=${Q(id)}`);
       host.navigate(pageHref(host, ''));
     });
   };
+  const share = async (): Promise<void> => {
+    const course = quiz.course ? (data.course?.title ?? null) : null;
+    if (await shareWithProject(host, act, { kind: 'quiz', id: quiz.id, title: quiz.title, course })) reload();
+  };
+  const keep = async (): Promise<void> => {
+    if (await keepJustForMe(host, act, { kind: 'quiz', id: quiz.id, title: quiz.title })) reload();
+  };
+  // a course and its quizzes are all the person's or all the project's (Academy REQ79)
+  const sameSide = (overview?.courses ?? []).filter((held) => held.local === quiz.local);
   const tabs: Array<{ name: string; label: string; show: boolean }> = [
     { name: '', label: 'My scores', show: true },
-    { name: 'compare', label: 'How you compare', show: true },
+    { name: 'compare', label: 'How you compare', show: !quiz.local },
     { name: 'results', label: 'Results', show: may.results },
     { name: 'guests', label: 'Guests', show: may.results && (data.guests ?? 0) > 0 },
     { name: 'grade', label: 'To grade', show: may.results && (data.to_grade ?? 0) + quiz.questions.filter((question) => question.type === 'written').length > 0 },
@@ -3459,13 +3699,19 @@ function QuizPage({ id, tab, generate }: { id: string; tab: string; generate: st
               {data.course.title} · Quiz {data.place} of {data.of}
             </Link>
           )}
+          {quiz.local && <LocalChip />}
           <div className="qz-row" style={{ alignItems: 'flex-start' }}>
             <div style={{ flex: '1 1 400px', minWidth: 0 }}>
               <InlineText className="qz-h1" as="h1" label="The quiz's name" value={quiz.title} editable={may.edit} onSave={(title) => title.trim() !== '' && patch({ title })} />
             </div>
             <span className="qz-head-actions">
+              {quiz.local && (
+                <Button size="sm" onClick={share}>
+                  Share with the project
+                </Button>
+              )}
               {/* a public link to the quiz (Academy REQ68); a host before share links has no `share` */}
-              {may.edit && data.askable > 0 && typeof host.share === 'function' && (
+              {!quiz.local && may.edit && data.askable > 0 && typeof host.share === 'function' && (
                 <Button size="sm" onClick={() => host.share(quiz.path, quiz.title)}>
                   Share
                 </Button>
@@ -3475,10 +3721,18 @@ function QuizPage({ id, tab, generate }: { id: string; tab: string; generate: st
                   Make flashcards from it
                 </Button>
               )}
-              {may.manage && (
+              {quiz.local && may.manage && (
                 <Button size="sm" variant="quiet" onClick={remove}>
                   Delete
                 </Button>
+              )}
+              {!quiz.local && may.manage && (
+                <HeadMenu
+                  items={[
+                    { label: 'Keep it just for me', run: keep, ...(may.keep_why ? { disabled: `${may.keep_why}, so it stays with the project.` } : {}) },
+                    { label: 'Delete', run: remove, danger: true, rule: true },
+                  ]}
+                />
               )}
             </span>
           </div>
@@ -3489,7 +3743,7 @@ function QuizPage({ id, tab, generate }: { id: string; tab: string; generate: st
                 <dd>
                   <Select aria-label="Course" value={quiz.course ?? ''} onChange={(event: { target: HTMLSelectElement }) => patch({ course: event.target.value || null })}>
                     <option value="">-</option>
-                    {(overview?.courses ?? []).map((held) => (
+                    {sameSide.map((held) => (
                       <option key={held.id} value={held.id}>
                         {held.title}
                       </option>
@@ -3498,25 +3752,29 @@ function QuizPage({ id, tab, generate }: { id: string; tab: string; generate: st
                 </dd>
               </>
             )}
-            <dt>Status</dt>
-            <dd>
-              <span className={`qz-badge${quiz.status === 'open' ? ' good' : ''}`}>{quiz.status === 'open' ? 'Open' : 'Closed'}</span>
-              {may.edit && (
-                <Button
-                  size="sm"
-                  disabled={quiz.status === 'closed' && data.askable === 0}
-                  title={quiz.status === 'closed' && data.askable === 0 ? 'Add a question first' : undefined}
-                  onClick={() => patch({ status: quiz.status === 'open' ? 'closed' : 'open' })}
-                >
-                  {quiz.status === 'open' ? 'Close quiz' : 'Open quiz'}
-                </Button>
-              )}
-              {may.edit && data.askable === 0 && !quiz.closed && (
-                <Text tone="faint" size="sm">
-                  Opens as soon as it has a question
-                </Text>
-              )}
-            </dd>
+            {!quiz.local && (
+              <>
+                <dt>Status</dt>
+                <dd>
+                  <span className={`qz-badge${quiz.status === 'open' ? ' good' : ''}`}>{quiz.status === 'open' ? 'Open' : 'Closed'}</span>
+                  {may.edit && (
+                    <Button
+                      size="sm"
+                      disabled={quiz.status === 'closed' && data.askable === 0}
+                      title={quiz.status === 'closed' && data.askable === 0 ? 'Add a question first' : undefined}
+                      onClick={() => patch({ status: quiz.status === 'open' ? 'closed' : 'open' })}
+                    >
+                      {quiz.status === 'open' ? 'Close quiz' : 'Open quiz'}
+                    </Button>
+                  )}
+                  {may.edit && data.askable === 0 && !quiz.closed && (
+                    <Text tone="faint" size="sm">
+                      Opens as soon as it has a question
+                    </Text>
+                  )}
+                </dd>
+              </>
+            )}
             <dt>Draws from</dt>
             <dd>
               <LinkPills
@@ -3527,26 +3785,30 @@ function QuizPage({ id, tab, generate }: { id: string; tab: string; generate: st
                 onChange={(draws_from) => patch({ draws_from })}
               />
             </dd>
-            <dt>Created by</dt>
-            <dd>
-              {quiz.created_by ? <UserPill alias={quiz.created_by} name={data.created_by_name} /> : <Text tone="faint">Unknown</Text>}
-              {may.manage && (
-                <span className="qz-add">
-                  <Select aria-label="Change who created it" value="" onChange={(event: { target: HTMLSelectElement }) => event.target.value && patch({ created_by: event.target.value })}>
-                    <option value="" hidden>
-                      {quiz.created_by ? 'Change…' : 'Set creator…'}
-                    </option>
-                    {data.people
-                      .filter((person) => person.alias !== quiz.created_by)
-                      .map((person) => (
-                        <option key={person.alias} value={person.alias}>
-                          {person.name} (@{person.alias})
+            {!quiz.local && (
+              <>
+                <dt>Created by</dt>
+                <dd>
+                  {quiz.created_by ? <UserPill alias={quiz.created_by} name={data.created_by_name} /> : <Text tone="faint">Unknown</Text>}
+                  {may.manage && (
+                    <span className="qz-add">
+                      <Select aria-label="Change who created it" value="" onChange={(event: { target: HTMLSelectElement }) => event.target.value && patch({ created_by: event.target.value })}>
+                        <option value="" hidden>
+                          {quiz.created_by ? 'Change…' : 'Set creator…'}
                         </option>
-                      ))}
-                  </Select>
-                </span>
-              )}
-            </dd>
+                        {data.people
+                          .filter((person) => person.alias !== quiz.created_by)
+                          .map((person) => (
+                            <option key={person.alias} value={person.alias}>
+                              {person.name} (@{person.alias})
+                            </option>
+                          ))}
+                      </Select>
+                    </span>
+                  )}
+                </dd>
+              </>
+            )}
             {may.results && (
               <>
                 <dt>
@@ -3668,6 +3930,69 @@ function startOf(question: Question, shuffled: boolean): Asked {
   return { question, order, draft, given: null, self: null };
 }
 
+// Putting items in order: each is dragged into place, or moved with its arrows from the keyboard. Once it locks, `right`
+// is the order the quiz holds, and each item is marked by whether it stands in its place.
+function SortAnswer({ items, right, onDraft, onGive }: { items: string[]; right: string[] | null; onDraft: (draft: Response) => void; onGive: (given: Response) => void }): JSX.Element {
+  const list = useRef<HTMLDivElement>(null);
+  const [held, setHeld] = useState<string | null>(null);
+  // the items as they last stood, since a drag moves them many times before the page draws again
+  const latest = useRef(items);
+  latest.current = items;
+  const move = (from: number, to: number): void => {
+    const next = [...latest.current];
+    const [taken] = next.splice(from, 1);
+    next.splice(to, 0, taken!);
+    latest.current = next;
+    onDraft(next);
+  };
+  const locked = right !== null;
+  return (
+    <>
+      <div ref={list}>
+        {items.map((item, index) => (
+          <div
+            key={item}
+            className={`qz-row-item${right ? (item === right[index] ? ' correct' : ' wrong') : ' qz-sortable'}${held === item ? ' qz-held' : ''}`}
+            onPointerDown={
+              locked
+                ? undefined
+                : (event) => {
+                    if (list.current && dragRow(event.nativeEvent, list.current, index, move, () => setHeld(null))) setHeld(item);
+                  }
+            }
+          >
+            {!locked && (
+              <span className="qz-grip" data-grip aria-hidden>
+                ⠿
+              </span>
+            )}
+            <span className="qz-n">{index + 1}</span>
+            <span className="qz-grow">{item}</span>
+            {!locked && (
+              <span className="qz-move">
+                <Button size="sm" variant="quiet" aria-label={`Move ${item} up`} disabled={index === 0} onClick={() => move(index, index - 1)}>
+                  ▲
+                </Button>
+                <Button size="sm" variant="quiet" aria-label={`Move ${item} down`} disabled={index === items.length - 1} onClick={() => move(index, index + 1)}>
+                  ▼
+                </Button>
+              </span>
+            )}
+          </div>
+        ))}
+      </div>
+      {!locked && (
+        <>
+          <p className="qz-muted qz-small">Drag each one into place, or move it with the arrows. It counts when every one is in place.</p>
+          <button className="qz-btn" onClick={() => onGive(items)}>
+            Check answer
+          </button>
+        </>
+      )}
+    </>
+  );
+}
+
 // What a person does to answer a question of each type (Academy REQ12).
 function Answering({
   asked,
@@ -3693,17 +4018,33 @@ function Answering({
     return chose ? ' wrong' : '';
   };
   switch (question.type) {
+    // a click picks an answer and Check answer gives it, so a person can think it over before it counts
     case 'choice':
-    case 'truefalse':
+    case 'truefalse': {
+      const picked = typeof draft === 'number' ? draft : null;
       return (
-        <div className={question.type === 'truefalse' ? 'qz-tf' : undefined}>
-          {order.map((index) => (
-            <button key={index} className={`qz-option${optionState(index)}`} disabled={locked} onClick={() => onGive(index)}>
-              {question.options[index]}
+        <>
+          <div className={question.type === 'truefalse' ? 'qz-tf' : undefined}>
+            {order.map((index) => (
+              <button
+                key={index}
+                className={`qz-option${locked ? optionState(index) : picked === index ? ' on' : ''}`}
+                disabled={locked}
+                aria-pressed={locked ? undefined : picked === index}
+                onClick={() => onDraft(index)}
+              >
+                {question.options[index]}
+              </button>
+            ))}
+          </div>
+          {!locked && (
+            <button className="qz-btn" style={{ marginTop: 14 }} disabled={picked === null} onClick={() => picked !== null && onGive(picked)}>
+              Check answer
             </button>
-          ))}
-        </div>
+          )}
+        </>
       );
+    }
     case 'all': {
       const picked = (draft as number[] | null) ?? [];
       return (
@@ -3762,43 +4103,8 @@ function Answering({
           )}
         </form>
       );
-    case 'order': {
-      const items = ((locked ? given : draft) as string[]) ?? [];
-      const move = (from: number, to: number): void => {
-        const next = [...items];
-        const [taken] = next.splice(from, 1);
-        next.splice(to, 0, taken!);
-        onDraft(next);
-      };
-      return (
-        <>
-          {items.map((item, index) => (
-            <div key={item} className={`qz-row-item${locked ? (item === question.items[index] ? ' correct' : ' wrong') : ''}`}>
-              <span className="qz-n">{index + 1}</span>
-              <span className="qz-grow">{item}</span>
-              {!locked && (
-                <span className="qz-move">
-                  <Button size="sm" variant="quiet" aria-label={`Move ${item} up`} disabled={index === 0} onClick={() => move(index, index - 1)}>
-                    ▲
-                  </Button>
-                  <Button size="sm" variant="quiet" aria-label={`Move ${item} down`} disabled={index === items.length - 1} onClick={() => move(index, index + 1)}>
-                    ▼
-                  </Button>
-                </span>
-              )}
-            </div>
-          ))}
-          {!locked && (
-            <>
-              <p className="qz-muted qz-small">Move each one with the arrows. It counts when every one is in place.</p>
-              <button className="qz-btn" onClick={() => onGive(items)}>
-                Check answer
-              </button>
-            </>
-          )}
-        </>
-      );
-    }
+    case 'order':
+      return <SortAnswer items={((locked ? given : draft) as string[]) ?? []} right={locked ? question.items : null} onDraft={onDraft} onGive={onGive} />;
     case 'match': {
       const chosen = ((locked ? given : draft) as string[]) ?? [];
       return (
@@ -3903,17 +4209,55 @@ function Feedback({ asked, kind, references }: { asked: Asked; kind: AttemptKind
   );
 }
 
+// A quiz part way through, kept when the person leaves the take screen (to read a reference, say) so coming back to the
+// same attempt picks up at the question they were on, with what they had answered. It lasts as long as the tab, through
+// a reload; seeing the results or quitting forgets it.
+interface Sitting {
+  items: Asked[];
+  position: number;
+}
+const sittings = new Map<string, Sitting>();
+const SITTING_KEY = 'academy-sitting:';
+
+function heldSitting(key: string): Sitting | null {
+  const held = sittings.get(key);
+  if (held) return held;
+  try {
+    const kept = sessionStorage.getItem(SITTING_KEY + key);
+    const parsed = kept ? (JSON.parse(kept) as Sitting) : null;
+    return parsed && Array.isArray(parsed.items) && parsed.position >= 0 && parsed.position < parsed.items.length ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function keepSitting(key: string, sitting: Sitting | null): void {
+  if (sitting) sittings.set(key, sitting);
+  else sittings.delete(key);
+  try {
+    if (sitting) sessionStorage.setItem(SITTING_KEY + key, JSON.stringify(sitting));
+    else sessionStorage.removeItem(SITTING_KEY + key);
+  } catch {
+    // without the tab's storage it is kept only until a reload
+  }
+}
+
 function Take({ id, kind, mode }: { id: string; kind: AttemptKind; mode: AttemptMode }): JSX.Element {
   const host = usePluginHost();
   const { data, error } = useData<QuizView>(`quiz?id=${Q(id)}`);
   useTrail(
     data
-      ? [{ label: 'Academy', href: pageHref(host, '') }, { label: data.quiz.id, mono: true, href: pageHref(host, `quiz/${Q(id)}`) }, { label: kind === 'official' ? 'Official attempt' : 'Practice' }]
+      ? [
+          { label: 'Academy', href: pageHref(host, '') },
+          { label: data.quiz.id, mono: true, href: pageHref(host, `quiz/${Q(id)}`) },
+          { label: data.quiz.local ? 'Taking the quiz' : kind === 'official' ? 'Official attempt' : 'Practice' },
+        ]
       : null,
   );
+  const sittingKey = `${id}|${kind}|${mode}`;
   // what is asked is fixed when the attempt starts, so a file changing under it never moves a question
-  const [items, setItems] = useState<Asked[] | null>(null);
-  const [position, setPosition] = useState(0);
+  const [items, setItems] = useState<Asked[] | null>(() => heldSitting(sittingKey)?.items ?? null);
+  const [position, setPosition] = useState(() => heldSitting(sittingKey)?.position ?? 0);
   const [finished, setFinished] = useState<Submitted | null>(null);
   const [sending, setSending] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
@@ -3927,6 +4271,10 @@ function Take({ id, kind, mode }: { id: string; kind: AttemptKind; mode: Attempt
     const inOrder = mode === 'whole' && !data.quiz.shuffle_questions ? asked : shuffle(asked);
     setItems(inOrder.map((question) => startOf(question, data.quiz.shuffle_options)));
   }, [data, items, mode]);
+
+  useEffect(() => {
+    if (items && !finished) keepSitting(sittingKey, { items, position });
+  }, [items, position, finished, sittingKey]);
 
   if (error) return <Failed message={error} />;
   if (!data || !items) return <Loading />;
@@ -4010,19 +4358,21 @@ function Take({ id, kind, mode }: { id: string; kind: AttemptKind; mode: Attempt
             <div className="qz-stats" style={{ marginTop: 18 }}>
               <Stat
                 label="Saved as"
-                value={<span style={{ fontSize: 26 }}>{attempt.kind === 'official' ? 'Official' : 'Practice'}</span>}
+                value={<span style={{ fontSize: 26 }}>{data.quiz.local ? 'Just for you' : attempt.kind === 'official' ? 'Official' : 'Practice'}</span>}
                 sub={attempt.kind === 'official' ? 'Shared with the project' : 'On this machine only'}
               />
-              <Stat
-                label="Quiz average"
-                value={asPercent(finished.average)}
-                sub={
-                  <Link className="qz-link" to={pageHref(host, `quiz/${Q(id)}/compare`)}>
-                    See how you compare
-                  </Link>
-                }
-              />
-              <Stat label="Official attempts" value={finished.official_attempts} sub="Saved to your history" />
+              {!data.quiz.local && (
+                <Stat
+                  label="Quiz average"
+                  value={asPercent(finished.average)}
+                  sub={
+                    <Link className="qz-link" to={pageHref(host, `quiz/${Q(id)}/compare`)}>
+                      See how you compare
+                    </Link>
+                  }
+                />
+              )}
+              <Stat label={data.quiz.local ? 'Attempts' : 'Official attempts'} value={finished.official_attempts} sub={data.quiz.local ? 'Whole quiz, on this machine' : 'Saved to your history'} />
             </div>
             <h2 className="qz-h2">Review</h2>
             <Review attempt={attempt} references={data.references} />
@@ -4052,7 +4402,9 @@ function Take({ id, kind, mode }: { id: string; kind: AttemptKind; mode: Attempt
     setFailure(null);
     try {
       const answers = items.map((held) => ({ question: held.question.id, response: held.given, ...(held.self !== null ? { self_marked: held.self } : {}) }));
-      setFinished(await host.post<Submitted>('attempt', { quiz: id, kind, mode, answers }));
+      const submitted = await host.post<Submitted>('attempt', { quiz: id, kind, mode, answers });
+      keepSitting(sittingKey, null);
+      setFinished(submitted);
     } catch (cause) {
       setFailure(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -4066,7 +4418,11 @@ function Take({ id, kind, mode }: { id: string; kind: AttemptKind; mode: Attempt
           <div className="qz-row">
             <span className="qz-muted qz-small" style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
               {data.quiz.title}
-              {kind === 'official' ? (
+              {data.quiz.local ? (
+                <span className="qz-badge">
+                  <LaptopMark /> Just for you
+                </span>
+              ) : kind === 'official' ? (
                 <span className="qz-badge accent">Official</span>
               ) : (
                 <span className="qz-badge">
@@ -4111,9 +4467,18 @@ function Take({ id, kind, mode }: { id: string; kind: AttemptKind; mode: Attempt
             </>
           )}
           <p style={{ marginTop: 30 }}>
-            <Link className="qz-muted qz-small" to={back}>
+            <a
+              className="qz-muted qz-small"
+              href={back}
+              onClick={(event) => {
+                keepSitting(sittingKey, null);
+                if (event.metaKey || event.ctrlKey || event.shiftKey) return;
+                event.preventDefault();
+                host.navigate(back);
+              }}
+            >
               Quit without saving
-            </Link>
+            </a>
           </p>
         </div>
       </Page>
@@ -4461,11 +4826,18 @@ function DeckPage({ id, tab, generate }: { id: string; tab: string; generate: st
     });
   };
   const remove = async (): Promise<void> => {
-    if (!(await host.dialog.confirm(`Delete ${deck.title}? People's study sessions with it stay in their history.`, { title: 'Delete deck', ok: 'Delete', danger: true }))) return;
+    const words = deck.local ? `Delete ${deck.title}? It is kept only on this machine, so it can't be brought back.` : `Delete ${deck.title}? People's study sessions with it stay in their history.`;
+    if (!(await host.dialog.confirm(words, { title: 'Delete deck', ok: 'Delete', danger: true }))) return;
     await act('Could not delete the deck', async () => {
       await host.del(`deck?id=${Q(id)}`);
       host.navigate(pageHref(host, ''));
     });
+  };
+  const share = async (): Promise<void> => {
+    if (await shareWithProject(host, act, { kind: 'deck', id: deck.id, title: deck.title, course: deck.course ? (data.course?.title ?? null) : null })) reload();
+  };
+  const keep = async (): Promise<void> => {
+    if (await keepJustForMe(host, act, { kind: 'deck', id: deck.id, title: deck.title })) reload();
   };
   const tabs: Array<{ name: string; label: string }> = [
     { name: '', label: 'My progress' },
@@ -4481,8 +4853,9 @@ function DeckPage({ id, tab, generate }: { id: string; tab: string; generate: st
               {data.course.title} · Deck {data.place} of {data.of}
             </Link>
           ) : (
-            <span className="qz-eyebrow">Deck</span>
+            !deck.local && <span className="qz-eyebrow">Deck</span>
           )}
+          {deck.local && <LocalChip />}
           <div className="qz-row" style={{ alignItems: 'flex-start' }}>
             <div style={{ flex: '1 1 400px', minWidth: 0 }}>
               <InlineText className="qz-h1" as="h1" label="The deck's name" value={deck.title} editable={may.edit} onSave={(title) => title.trim() !== '' && patch({ title })} />
@@ -4493,10 +4866,23 @@ function DeckPage({ id, tab, generate }: { id: string; tab: string; generate: st
                   Study {Math.min(deck.per_session, data.studiable)} cards
                 </Link>
               )}
-              {may.manage && (
+              {deck.local && (
+                <Button size="sm" onClick={share}>
+                  Share with the project
+                </Button>
+              )}
+              {deck.local && may.manage && (
                 <Button size="sm" variant="quiet" onClick={remove}>
                   Delete
                 </Button>
+              )}
+              {!deck.local && may.manage && (
+                <HeadMenu
+                  items={[
+                    { label: 'Keep it just for me', run: keep, ...(may.keep_why ? { disabled: `${may.keep_why}, so it stays with the project.` } : {}) },
+                    { label: 'Delete', run: remove, danger: true, rule: true },
+                  ]}
+                />
               )}
             </span>
           </div>
@@ -4507,34 +4893,40 @@ function DeckPage({ id, tab, generate }: { id: string; tab: string; generate: st
                 <dd>
                   <Select aria-label="Course" value={deck.course ?? ''} onChange={(event: { target: HTMLSelectElement }) => patch({ course: event.target.value || null })}>
                     <option value="">-</option>
-                    {(overview?.courses ?? []).map((held) => (
-                      <option key={held.id} value={held.id}>
-                        {held.title}
-                      </option>
-                    ))}
+                    {(overview?.courses ?? [])
+                      .filter((held) => held.local === deck.local)
+                      .map((held) => (
+                        <option key={held.id} value={held.id}>
+                          {held.title}
+                        </option>
+                      ))}
                   </Select>
                 </dd>
               </>
             )}
-            <dt>Status</dt>
-            <dd>
-              <span className={`qz-badge${deck.status === 'open' ? ' good' : ''}`}>{deck.status === 'open' ? 'Open' : 'Closed'}</span>
-              {may.edit && (
-                <Button
-                  size="sm"
-                  disabled={deck.status === 'closed' && data.studiable === 0}
-                  title={deck.status === 'closed' && data.studiable === 0 ? 'Add a card first' : undefined}
-                  onClick={() => patch({ status: deck.status === 'open' ? 'closed' : 'open' })}
-                >
-                  {deck.status === 'open' ? 'Close deck' : 'Open deck'}
-                </Button>
-              )}
-              {may.edit && data.studiable === 0 && !deck.closed && (
-                <Text tone="faint" size="sm">
-                  Opens as soon as it has a card
-                </Text>
-              )}
-            </dd>
+            {!deck.local && (
+              <>
+                <dt>Status</dt>
+                <dd>
+                  <span className={`qz-badge${deck.status === 'open' ? ' good' : ''}`}>{deck.status === 'open' ? 'Open' : 'Closed'}</span>
+                  {may.edit && (
+                    <Button
+                      size="sm"
+                      disabled={deck.status === 'closed' && data.studiable === 0}
+                      title={deck.status === 'closed' && data.studiable === 0 ? 'Add a card first' : undefined}
+                      onClick={() => patch({ status: deck.status === 'open' ? 'closed' : 'open' })}
+                    >
+                      {deck.status === 'open' ? 'Close deck' : 'Open deck'}
+                    </Button>
+                  )}
+                  {may.edit && data.studiable === 0 && !deck.closed && (
+                    <Text tone="faint" size="sm">
+                      Opens as soon as it has a card
+                    </Text>
+                  )}
+                </dd>
+              </>
+            )}
             <dt>Draws from</dt>
             <dd>
               <LinkPills
@@ -4570,27 +4962,31 @@ function DeckPage({ id, tab, generate }: { id: string; tab: string; generate: st
             </dd>
             <dt>Last studied</dt>
             <dd>{data.progress.last_studied ? formatDate(data.progress.last_studied) : <Text tone="faint">Not yet</Text>}</dd>
-            <dt>Created by</dt>
-            <dd>
-              {deck.created_by ? <UserPill alias={deck.created_by} name={data.created_by_name} /> : <Text tone="faint">Unknown</Text>}
-              {may.manage && (
-                <span className="qz-add">
-                  <Select aria-label="Change who created it" value="" onChange={(event: { target: HTMLSelectElement }) => event.target.value && patch({ created_by: event.target.value })}>
-                    <option value="" hidden>
-                      {deck.created_by ? 'Change…' : 'Set creator…'}
-                    </option>
-                    {data.people
-                      .filter((person) => person.alias !== deck.created_by)
-                      .map((person) => (
-                        <option key={person.alias} value={person.alias}>
-                          {person.name} (@{person.alias})
+            {!deck.local && (
+              <>
+                <dt>Created by</dt>
+                <dd>
+                  {deck.created_by ? <UserPill alias={deck.created_by} name={data.created_by_name} /> : <Text tone="faint">Unknown</Text>}
+                  {may.manage && (
+                    <span className="qz-add">
+                      <Select aria-label="Change who created it" value="" onChange={(event: { target: HTMLSelectElement }) => event.target.value && patch({ created_by: event.target.value })}>
+                        <option value="" hidden>
+                          {deck.created_by ? 'Change…' : 'Set creator…'}
                         </option>
-                      ))}
-                  </Select>
-                </span>
-              )}
-            </dd>
-            {may.edit && (
+                        {data.people
+                          .filter((person) => person.alias !== deck.created_by)
+                          .map((person) => (
+                            <option key={person.alias} value={person.alias}>
+                              {person.name} (@{person.alias})
+                            </option>
+                          ))}
+                      </Select>
+                    </span>
+                  )}
+                </dd>
+              </>
+            )}
+            {may.edit && !deck.local && (
               <>
                 <dt>
                   Editors <HelpMark tip="Can change the deck and its cards" />
@@ -4976,6 +5372,11 @@ function KeepStudying(): JSX.Element {
                       {row.title}
                     </Link>
                     <span className="qz-muted qz-small">
+                      {row.local && (
+                        <span className="qz-chip-local">
+                          <LaptopMark /> Local ·{' '}
+                        </span>
+                      )}
                       {row.course_title ?? 'One-off deck'} · {row.learned} of {row.cards} learned · {row.last_studied ? `last studied ${formatDate(row.last_studied)}` : 'not studied yet'}
                     </span>
                   </span>
@@ -5023,6 +5424,11 @@ function BesideBlueprint(): JSX.Element {
                 {row.title}
               </Link>
               <div className="qz-muted qz-small">
+                {row.local && (
+                  <span className="qz-chip-local">
+                    <LaptopMark /> Local ·{' '}
+                  </span>
+                )}
                 {row.best === null ? 'Not yet taken' : `Your best ${asPercent(row.best)}`}. {row.questions} questions.
               </div>
               <div style={{ marginTop: 8 }}>
@@ -5042,6 +5448,11 @@ function BesideBlueprint(): JSX.Element {
                 {row.title}
               </Link>
               <div className="qz-muted qz-small">
+                {row.local && (
+                  <span className="qz-chip-local">
+                    <LaptopMark /> Local ·{' '}
+                  </span>
+                )}
                 {row.learned + row.learning === 0 ? 'Not yet studied' : `${row.learned} of ${row.cards} learned`}. {row.cards} cards.
               </div>
               <div style={{ marginTop: 8 }}>

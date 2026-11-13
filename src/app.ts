@@ -17,7 +17,7 @@ const entry: AppEntry<Api> = {
     host.route('GET', 'pickable', () => api.pickable());
 
     host.route('GET', 'quiz', (request) => api.quiz(need(request, 'id')));
-    host.route('POST', 'quiz', (request) => api.createQuiz(request.body as { title: string; draws_from?: string[]; course?: string | null; place?: number | null }));
+    host.route('POST', 'quiz', (request) => api.createQuiz(request.body as Parameters<Api['createQuiz']>[0]));
     host.route('PUT', 'quiz', (request) => api.updateQuiz(need(request, 'id'), request.body as Parameters<Api['updateQuiz']>[1]));
     host.route('DELETE', 'quiz', (request) => api.removeQuiz(need(request, 'id')));
 
@@ -36,7 +36,7 @@ const entry: AppEntry<Api> = {
     host.route('DELETE', 'guests', (request) => api.removeGuests(need(request, 'id'), { attempt: request.query.get('attempt') ?? undefined, link: request.query.get('link') ?? undefined }));
 
     host.route('GET', 'course', (request) => api.course(need(request, 'id')));
-    host.route('POST', 'course', (request) => api.createCourse(request.body as { title: string; description?: string }));
+    host.route('POST', 'course', (request) => api.createCourse(request.body as Parameters<Api['createCourse']>[0]));
     host.route('PUT', 'course', (request) => api.updateCourse(need(request, 'id'), request.body as Parameters<Api['updateCourse']>[1]));
     host.route('DELETE', 'course', (request) => api.removeCourse(need(request, 'id')));
     host.route('PUT', 'course/order', (request) => api.reorderCourse(need(request, 'id'), request.body['ids'] as string[]));
@@ -58,6 +58,9 @@ const entry: AppEntry<Api> = {
     host.route('GET', 'study', (request) => api.study({ deck: request.query.get('deck'), course: request.query.get('course'), mode: request.query.get('mode') as StudyMode | null }));
     host.route('POST', 'study', (request) => api.saveStudy(request.body as Parameters<Api['saveStudy']>[0]));
     host.route('GET', 'keep-studying', () => api.keepStudying());
+
+    host.route('POST', 'share-with-project', (request) => api.share(need(request, 'id')));
+    host.route('POST', 'keep-just-for-me', (request) => api.keep(need(request, 'id')));
 
     host.route('POST', 'move-quizzes', () => api.moveFromQuizzes());
 

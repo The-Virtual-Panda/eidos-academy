@@ -1,7 +1,8 @@
 // The plugin's files: quizzes, decks, and courses in its own folder; official attempts and
-// a signed-in person's study sessions in its workspace; practice attempts and the study
-// sessions of nobody in particular in its local folder. Every write of a file others see goes
-// through the host's one write path; what is in the local folder is this machine's alone.
+// a signed-in person's study sessions in its workspace; practice attempts, the study sessions
+// of nobody in particular, and the quizzes, decks, and courses kept just for one person in its
+// local folder. Every write of a file others see goes through the host's one write path; what
+// is in the local folder is this machine's alone.
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -51,6 +52,9 @@ export const QUIZZES_OWNER = '@quizzes/quizzes';
 const QUIZZES_WORKSPACE = '.eidos/plugins/quizzes';
 // who a practice attempt is by while no user is selected
 export const LOCAL_PERSON = 'local';
+// the folder of the plugin's local folder that holds quizzes, decks, and courses kept just for
+// the person on this machine, laid out as the plugin's own folder is (Academy REQ76)
+const LOCAL_ITEMS = 'academy';
 
 export interface ProjectPerson extends Person {
   name: string;
@@ -101,6 +105,23 @@ export class Store {
     return posix(path.relative(this.root, this.host.workspace));
   }
 
+  // where the quizzes, decks, and courses kept just for this person live, root-relative
+  localFolder(): string {
+    return `${this.workspaceRel}/local/${LOCAL_ITEMS}`;
+  }
+
+  private isLocal(rel: string): boolean {
+    return rel.startsWith(`${this.localFolder()}/`);
+  }
+
+  // A file of the plugin's own folder goes through the host's one write path, so others get it;
+  // one in the local folder is written straight to this machine and goes nowhere.
+  private async write(rel: string, text: string): Promise<void> {
+    mkdirSync(path.dirname(this.abs(rel)), { recursive: true });
+    if (this.isLocal(rel)) writeFileSync(this.abs(rel), text);
+    else await this.host.writeFile(rel, text);
+  }
+
   // ---- reading ------------------------------------------------------------------
 
   list(): Listed {
@@ -108,13 +129,27 @@ export class Store {
     const decks: Deck[] = [];
     const courses: Course[] = [];
     const problems: Listed['problems'] = [];
-    const folder = this.folderName();
+    for (const [folder, local] of [
+      [this.folderName(), false],
+      [this.localFolder(), true],
+    ] as const)
+      this.readFolder(folder, local, { quizzes, decks, courses, problems });
+    const byRank = (a: { rank: number; title: string }, b: { rank: number; title: string }): number => a.rank - b.rank || a.title.localeCompare(b.title);
+    quizzes.sort(byRank);
+    decks.sort(byRank);
+    courses.sort((a, b) => a.title.localeCompare(b.title));
+    return { quizzes, decks, courses, problems };
+  }
+
+  // One folder of quizzes, decks, and courses: the plugin's own, or the local one, laid out alike.
+  private readFolder(folder: string, local: boolean, into: Listed): void {
+    const { quizzes, decks, courses, problems } = into;
     const readQuiz = (rel: string, course: string | null): void => {
       let source = '';
       try {
         source = readFileSync(this.abs(rel), 'utf8');
-        if (isDeckSource(source)) decks.push(parseDeck(source, rel, course));
-        else quizzes.push(parseQuiz(source, rel, course));
+        if (isDeckSource(source)) decks.push({ ...parseDeck(source, rel, course), local });
+        else quizzes.push({ ...parseQuiz(source, rel, course), local });
       } catch (cause) {
         problems.push({ path: rel, message: `this ${isDeckSource(source) ? 'deck' : 'quiz'} does not read: ${cause instanceof Error ? cause.message : String(cause)}` });
       }
@@ -131,7 +166,7 @@ export class Store {
       let course: Course | null = null;
       if (existsSync(this.abs(`${rel}/${COURSE_FILE}`))) {
         try {
-          course = parseCourse(readFileSync(this.abs(`${rel}/${COURSE_FILE}`), 'utf8'), `${rel}/${COURSE_FILE}`);
+          course = { ...parseCourse(readFileSync(this.abs(`${rel}/${COURSE_FILE}`), 'utf8'), `${rel}/${COURSE_FILE}`), local };
           courses.push(course);
         } catch (cause) {
           problems.push({ path: `${rel}/${COURSE_FILE}`, message: `this course does not read: ${cause instanceof Error ? cause.message : String(cause)}` });
@@ -144,11 +179,6 @@ export class Store {
         readQuiz(`${rel}/${inner}`, course?.id ?? null);
       }
     }
-    const byRank = (a: { rank: number; title: string }, b: { rank: number; title: string }): number => a.rank - b.rank || a.title.localeCompare(b.title);
-    quizzes.sort(byRank);
-    decks.sort(byRank);
-    courses.sort((a, b) => a.title.localeCompare(b.title));
-    return { quizzes, decks, courses, problems };
   }
 
   quiz(id: string): Quiz {
@@ -274,10 +304,9 @@ export class Store {
   }
 
   async saveQuiz(quiz: Quiz): Promise<void> {
-    mkdirSync(path.dirname(this.abs(quiz.path)), { recursive: true });
-    await this.host.writeFile(quiz.path, renderQuiz(quiz));
+    await this.write(quiz.path, renderQuiz(quiz));
     // a quiz shared by a public link: its link follows it (Academy REQ68)
-    if (existsSync(this.abs(this.sharePaths(quiz.id).guest))) await this.writeShare(this.quiz(quiz.id));
+    if (!quiz.local && existsSync(this.abs(this.sharePaths(quiz.id).guest))) await this.writeShare(this.quiz(quiz.id));
   }
 
   // ---- a quiz's public link (Academy REQ68) ------------------------------------------------
@@ -318,9 +347,22 @@ export class Store {
     }
   }
 
-  private courseFolder(courseId: string | null): string {
-    if (courseId === null) return this.folderName();
+  private courseFolder(courseId: string | null, local: boolean): string {
+    if (courseId === null) return local ? this.localFolder() : this.folderName();
     return path.posix.dirname(this.course(courseId).path);
+  }
+
+  // A course and its quizzes and decks are all one person's or all the project's (Academy REQ79).
+  private sameSide(courseId: string | null, local: boolean, what: string): void {
+    if (courseId === null) return;
+    const course = this.course(courseId);
+    if (course.local !== local)
+      throw new HostError(
+        409,
+        course.local
+          ? `${course.title} is just yours, so it holds only ${what}s kept just for you`
+          : `${course.title} is the project's, so a ${what} kept just for you can't go in it; share the ${what} with the project first`,
+      );
   }
 
   private nextRank(courseId: string | null): number {
@@ -328,11 +370,13 @@ export class Store {
     return Math.max(0, ...ranked.map((placed) => placed.item.rank)) + 1;
   }
 
-  async createQuiz(input: { closed?: boolean; title: string; draws_from?: string[]; course?: string | null; created_by?: string | null; rank?: number | null }): Promise<Quiz> {
+  async createQuiz(input: { closed?: boolean; title: string; draws_from?: string[]; course?: string | null; created_by?: string | null; rank?: number | null; local?: boolean }): Promise<Quiz> {
     const title = input.title.trim();
     if (!title) throw new HostError(400, 'a quiz needs a title');
     const listed = this.list();
     const course = input.course ?? null;
+    const local = input.local ?? (course !== null && this.course(course).local);
+    this.sameSide(course, local, 'quiz');
     const quiz: Quiz = {
       id: drawId(
         'Q-',
@@ -351,7 +395,8 @@ export class Store {
       shuffle_options: true,
       guest_name: 'required',
       questions: [],
-      path: this.freePath(this.courseFolder(course), title),
+      path: this.freePath(this.courseFolder(course, local), title),
+      local,
     };
     await this.saveQuiz(quiz);
     if (input.rank !== undefined && input.rank !== null && course !== null) await this.place(quiz.id, input.rank);
@@ -362,7 +407,8 @@ export class Store {
   async moveQuiz(id: string, course: string | null): Promise<Quiz> {
     const quiz = this.quiz(id);
     if (quiz.course === course) return quiz;
-    const moved: Quiz = { ...quiz, course, rank: this.nextRank(course), path: this.freePath(this.courseFolder(course), quiz.title) };
+    this.sameSide(course, quiz.local, 'quiz');
+    const moved: Quiz = { ...quiz, course, rank: this.nextRank(course), path: this.freePath(this.courseFolder(course, quiz.local), quiz.title) };
     renameSync(this.abs(quiz.path), this.abs(moved.path));
     await this.saveQuiz(moved);
     return moved;
@@ -404,13 +450,12 @@ export class Store {
     return quiz;
   }
 
-  async createCourse(input: { title: string; description?: string; created_by?: string | null; content?: string[]; study_plan?: string[] }): Promise<Course> {
+  async createCourse(input: { title: string; description?: string; created_by?: string | null; content?: string[]; study_plan?: string[]; local?: boolean }): Promise<Course> {
     const title = input.title.trim();
     if (!title) throw new HostError(400, 'a course needs a title');
     const listed = this.list();
-    const stem = slugify(title);
-    let folder = `${this.folderName()}/${stem}`;
-    for (let turn = 2; existsSync(this.abs(folder)); turn += 1) folder = `${this.folderName()}/${stem}-${turn}`;
+    const local = input.local ?? false;
+    const folder = this.freeFolder(local ? this.localFolder() : this.folderName(), title);
     const course: Course = {
       id: drawId(
         'C-',
@@ -422,14 +467,21 @@ export class Store {
       content: input.content ?? [],
       study_plan: input.study_plan ?? [],
       path: `${folder}/${COURSE_FILE}`,
+      local,
     };
-    mkdirSync(this.abs(folder), { recursive: true });
-    await this.host.writeFile(course.path, renderCourse(course));
+    await this.write(course.path, renderCourse(course));
     return course;
   }
 
+  private freeFolder(base: string, title: string): string {
+    const stem = slugify(title);
+    let folder = `${base}/${stem}`;
+    for (let turn = 2; existsSync(this.abs(folder)); turn += 1) folder = `${base}/${stem}-${turn}`;
+    return folder;
+  }
+
   async saveCourse(course: Course): Promise<void> {
-    await this.host.writeFile(course.path, renderCourse(course));
+    await this.write(course.path, renderCourse(course));
   }
 
   // A course goes and its quizzes and decks stay, as one-offs (Academy REQ28).
@@ -444,11 +496,43 @@ export class Store {
     return { course, quizzes: quizzes.length, decks: decks.length };
   }
 
+  // ---- sharing what was kept just for one person, and keeping it again (Academy REQ80) ----
+
+  // Moves a quiz, a deck, or a course with everything in it to the other side: from this machine
+  // into the plugin's own folder, or back. Ids stay, so every attempt and session still names
+  // what it was of. A quiz or a deck leaving a course on the other side stands alone.
+  async moveAcross(id: string, toLocal: boolean, createdBy: string | null | undefined): Promise<{ kind: 'quiz' | 'deck' | 'course'; id: string; moved: number }> {
+    const listed = this.list();
+    const course = listed.courses.find((held) => held.id.toLowerCase() === id.toLowerCase());
+    const base = toLocal ? this.localFolder() : this.folderName();
+    const owner = <T extends { created_by: string | null }>(thing: T): T => (createdBy === undefined ? thing : { ...thing, created_by: createdBy });
+    if (course) {
+      if (course.local === toLocal) return { kind: 'course', id: course.id, moved: 0 };
+      const folder = this.freeFolder(base, course.title);
+      const from = path.posix.dirname(course.path);
+      await this.write(`${folder}/${COURSE_FILE}`, renderCourse(owner({ ...course, path: `${folder}/${COURSE_FILE}`, local: toLocal })));
+      const inside = this.inCourse(course.id);
+      for (const placed of inside) {
+        const rel = `${folder}/${path.posix.basename(placed.item.path)}`;
+        if (placed.kind === 'quiz') await this.write(rel, renderQuiz(owner({ ...placed.item, path: rel, local: toLocal })));
+        else await this.write(rel, renderDeck(owner({ ...placed.item, path: rel, local: toLocal })));
+      }
+      rmSync(this.abs(from), { recursive: true });
+      return { kind: 'course', id: course.id, moved: inside.length };
+    }
+    const placed = this.placed(id);
+    if (placed.item.local === toLocal) return { kind: placed.kind, id: placed.item.id, moved: 0 };
+    const rel = this.freePath(base, placed.item.title);
+    const item = owner({ ...placed.item, course: null, rank: Number.MAX_SAFE_INTEGER, path: rel, local: toLocal });
+    await this.write(rel, placed.kind === 'quiz' ? renderQuiz(item as Quiz) : renderDeck(item as Deck));
+    rmSync(this.abs(placed.item.path));
+    return { kind: placed.kind, id: placed.item.id, moved: 1 };
+  }
+
   // ---- decks and their cards ------------------------------------------------------
 
   async saveDeck(deck: Deck): Promise<void> {
-    mkdirSync(path.dirname(this.abs(deck.path)), { recursive: true });
-    await this.host.writeFile(deck.path, renderDeck(deck));
+    await this.write(deck.path, renderDeck(deck));
   }
 
   async createDeck(input: {
@@ -460,11 +544,14 @@ export class Store {
     rank?: number | null;
     made_from?: string | null;
     cards?: Card[];
+    local?: boolean;
   }): Promise<Deck> {
     const title = input.title.trim();
     if (!title) throw new HostError(400, 'a deck needs a title');
     const listed = this.list();
     const course = input.course ?? null;
+    const local = input.local ?? (course !== null && this.course(course).local);
+    this.sameSide(course, local, 'deck');
     const deck: Deck = {
       id: drawId(
         'F-',
@@ -481,7 +568,8 @@ export class Store {
       course,
       per_session: CARDS_A_SESSION,
       cards: input.cards ?? [],
-      path: this.freePath(this.courseFolder(course), title),
+      path: this.freePath(this.courseFolder(course, local), title),
+      local,
     };
     await this.saveDeck(deck);
     if (input.rank !== undefined && input.rank !== null && course !== null) await this.place(deck.id, input.rank);
@@ -492,7 +580,8 @@ export class Store {
   async moveDeck(id: string, course: string | null): Promise<Deck> {
     const deck = this.deck(id);
     if (deck.course === course) return deck;
-    const moved: Deck = { ...deck, course, rank: this.nextRank(course), path: this.freePath(this.courseFolder(course), deck.title) };
+    this.sameSide(course, deck.local, 'deck');
+    const moved: Deck = { ...deck, course, rank: this.nextRank(course), path: this.freePath(this.courseFolder(course, deck.local), deck.title) };
     renameSync(this.abs(deck.path), this.abs(moved.path));
     await this.saveDeck(moved);
     return moved;
@@ -657,6 +746,17 @@ export class Store {
     const local = this.reviewsIn(path.join(this.host.workspace, 'local', REVIEWS_FOLDER), false).filter((review) => review.by === LOCAL_PERSON || review.by === alias);
     const all = [...shared, ...local];
     return deck ? all.filter((review) => review.deck === deck) : all;
+  }
+
+  // Everyone whose sessions with a deck are kept with the project.
+  studiedBy(deck: string): string[] {
+    return [
+      ...new Set(
+        this.reviewsIn(path.join(this.host.workspace, 'results'), true)
+          .filter((review) => review.deck === deck)
+          .map((review) => review.by),
+      ),
+    ];
   }
 
   newReviewId(): string {

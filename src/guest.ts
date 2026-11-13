@@ -3,6 +3,7 @@
 // each answer through Eidos against the key it never sees, and sends the attempt through Eidos. A guest's words, and every
 // word of the guest copy, are drawn as text and never as markup.
 import type { GuestDraw, GuestHost, GuestResult } from 'eidosmd/guest';
+import { dragRow } from './drag.ts';
 import type { GuestCopy, GuestQuestion, Shown } from './share.ts';
 
 type Answer = number | number[] | string | string[];
@@ -47,6 +48,7 @@ html, body { background: var(--canvas); }
 .qg .option { display: flex; gap: 10px; align-items: center; width: 100%; min-height: 48px; margin: 0 0 8px; padding: 12px 14px; border: 1px solid var(--line-strong);
   border-radius: 12px; background: var(--raised); color: var(--fg); font: inherit; text-align: left; cursor: pointer; }
 .qg .option:disabled { cursor: default; }
+.qg .option.picked { border-color: var(--accent); background: var(--accent-soft); box-shadow: 0 0 0 1px var(--accent); }
 .qg .option input { width: 18px; height: 18px; margin: 0; accent-color: var(--accent); flex: none; }
 .qg .option.right { border-color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, var(--raised)); }
 .qg .option.wrong { border-color: var(--err); background: color-mix(in srgb, var(--err) 12%, var(--raised)); }
@@ -56,6 +58,8 @@ html, body { background: var(--canvas); }
 .qg textarea { min-height: 120px; resize: vertical; }
 .qg .row { display: flex; gap: 8px; align-items: center; margin: 0 0 8px; padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--raised); }
 .qg .row > span { flex: 1; }
+.qg .row.sortable { cursor: grab; user-select: none; } .qg .row.held { border-color: var(--accent); box-shadow: 0 8px 24px rgb(0 0 0 / .14); cursor: grabbing; }
+.qg .row .grip { flex: none; padding: 4px 2px; color: var(--muted); font-size: 18px; font-weight: 400; line-height: 1; touch-action: none; cursor: grab; }
 .qg .pair { margin: 0 0 12px; } .qg .pair > span { display: block; font-weight: 600; margin-bottom: 4px; }
 .qg button.btn { display: inline-flex; align-items: center; justify-content: center; min-height: 46px; padding: 10px 22px; border: 1px solid var(--accent);
   border-radius: 99px; background: var(--accent); color: var(--on-accent); font: inherit; font-weight: 600; cursor: pointer; }
@@ -224,27 +228,44 @@ const draw: GuestDraw<HTMLElement> = (root: HTMLElement, eidos: GuestHost) => {
     if (question.type === 'choice' || question.type === 'truefalse') {
       const shown = copy!.shuffle_options && question.type === 'choice' ? shuffled(question.options.map((_, index) => index)) : question.options.map((_, index) => index);
       const buttons = new Map<number, HTMLButtonElement>();
+      // a click picks an answer and Check answer gives it, so a guest can think it over before it counts
+      let picked: number | null = null;
+      const give = button('Check answer', () => {
+        if (picked === null) return;
+        lockAll();
+        send(picked);
+      });
+      const pick = (index: number): void => {
+        picked = index;
+        for (const [at, option] of buttons) {
+          option.classList.toggle('picked', at === index);
+          option.setAttribute('aria-pressed', String(at === index));
+        }
+        give.disabled = false;
+      };
       for (const index of shown) {
-        const option = button(
-          question.options[index] ?? '',
-          () => {
-            lockAll();
-            send(index);
-          },
-          'option',
-        );
+        const option = button(question.options[index] ?? '', () => pick(index), 'option');
+        option.setAttribute('aria-pressed', 'false');
         buttons.set(index, option);
         controls.push(option);
         form.append(option);
       }
+      give.disabled = true;
+      controls.push(give);
+      form.append(el('div', { class: 'gap' }), give);
       return {
         lock: (said, right, answer) => {
           lockAll();
+          give.remove();
+          for (const option of buttons.values()) option.classList.remove('picked');
           const chosen = buttons.get(answer as number);
           if (right !== null) chosen?.classList.add(right ? 'right' : 'wrong');
           if (right === false && said) for (const [index, option] of buttons) if ((question.options[index] ?? '').trim() === said.right) option.classList.add('right');
         },
-        unlock: unlockAll,
+        unlock: () => {
+          for (const option of buttons.values()) option.disabled = false;
+          give.disabled = picked === null;
+        },
       };
     }
     const check = button(question.type === 'written' ? 'Submit' : 'Check answer', () => {
@@ -280,6 +301,8 @@ const draw: GuestDraw<HTMLElement> = (root: HTMLElement, eidos: GuestHost) => {
     } else if (question.type === 'order') {
       const items = [...question.items];
       const list = el('ol', { style: 'list-style:none;margin:0;padding:0', 'aria-label': 'Items, in the order you put them' });
+      // the item being dragged, drawn lifted
+      let held: string | null = null;
       const paint = (): void => {
         list.replaceChildren(
           ...items.map((item, index) => {
@@ -289,9 +312,32 @@ const draw: GuestDraw<HTMLElement> = (root: HTMLElement, eidos: GuestHost) => {
             down.setAttribute('aria-label', `Move ${item} down`);
             up.disabled = index === 0 || check.disabled;
             down.disabled = index === items.length - 1 || check.disabled;
-            return el('li', { class: 'row' }, el('span', {}, `${index + 1} · ${item}`), up, down);
+            if (check.disabled) return el('li', { class: 'row' }, el('span', {}, `${index + 1} · ${item}`), up, down);
+            const row = el(
+              'li',
+              { class: `row sortable${held === item ? ' held' : ''}` },
+              el('b', { class: 'grip', 'data-grip': '', 'aria-hidden': 'true' }, '⠿'),
+              el('span', {}, `${index + 1} · ${item}`),
+              up,
+              down,
+            );
+            row.addEventListener('pointerdown', (event) => {
+              const dragging = dragRow(event, list, index, place, () => {
+                held = null;
+                paint();
+              });
+              if (!dragging) return;
+              held = item;
+              paint();
+            });
+            return row;
           }),
         );
+      };
+      const place = (from: number, to: number): void => {
+        const [taken] = items.splice(from, 1);
+        items.splice(to, 0, taken!);
+        paint();
       };
       const move = (index: number, by: number): void => {
         const [taken] = items.splice(index, 1);
@@ -300,7 +346,7 @@ const draw: GuestDraw<HTMLElement> = (root: HTMLElement, eidos: GuestHost) => {
         list.querySelectorAll<HTMLButtonElement>('button')[index * 2 + by * 2 + (by > 0 ? 1 : 0)]?.focus();
       };
       paint();
-      form.append(list, el('div', { class: 'gap' }));
+      form.append(list, el('p', { class: 'faint' }, 'Drag each one into place, or move it with the arrows.'), el('div', { class: 'gap' }));
       read = () => [...items];
       repaint = paint;
     } else if (question.type === 'match') {

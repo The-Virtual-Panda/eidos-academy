@@ -163,9 +163,13 @@ const entry: CliEntry = {
             const where = (row: { course_title: string | null; place: number | null }): string => (row.course_title ? `${row.course_title} ${row.place}` : 'one-off');
             const lines = [
               ...overview.quizzes.map(
-                (row) => `${row.id}  quiz  ${row.title}  ·  ${where(row)}  ·  ${row.status === 'closed' ? 'closed  ·  ' : ''}${row.questions} questions  ·  best ${asPercent(row.best)}`,
+                (row) =>
+                  `${row.id}  quiz  ${row.title}  ·  ${where(row)}  ·  ${row.local ? 'local  ·  ' : ''}${row.status === 'closed' ? 'closed  ·  ' : ''}${row.questions} questions  ·  best ${asPercent(row.best)}`,
               ),
-              ...overview.decks.map((row) => `${row.id}  deck  ${row.title}  ·  ${where(row)}  ·  ${row.status === 'closed' ? 'closed  ·  ' : ''}${row.cards} cards  ·  ${row.learned} learned`),
+              ...overview.decks.map(
+                (row) =>
+                  `${row.id}  deck  ${row.title}  ·  ${where(row)}  ·  ${row.local ? 'local  ·  ' : ''}${row.status === 'closed' ? 'closed  ·  ' : ''}${row.cards} cards  ·  ${row.learned} learned`,
+              ),
             ];
             const left = overview.quizzes_left
               ? `\n\nQuizzes left ${overview.quizzes_left.quizzes} quizzes and ${overview.quizzes_left.results} result files here; eidos academy move-quizzes brings them into Academy`
@@ -198,18 +202,20 @@ const entry: CliEntry = {
         .option('--created-by <alias>', 'who created it; absent, you')
         .option('--closed', 'keep it closed until someone opens it; absent, it opens as soon as it has a question')
         .option('--open', 'the default, kept so a script that passes it still runs')
+        .option('--local', 'keep it just for you, on this machine: never committed or synced, and nobody else sees it')
         .option('--json', 'the quiz')
-        .action(async (title: string, options: { drawsFrom: string[]; course?: string; place?: string; createdBy?: string; closed?: boolean }, command: Options) => {
+        .action(async (title: string, options: { drawsFrom: string[]; course?: string; place?: string; createdBy?: string; closed?: boolean; local?: boolean }, command: Options) => {
           await run(command, async (json) => {
             const quiz = await store.createQuiz({
               ...(options.closed ? { closed: true } : {}),
+              ...(options.local ? { local: true } : {}),
               title,
               draws_from: options.drawsFrom,
               course: options.course ? store.course(options.course).id : null,
               rank: options.place ? Number(options.place) : null,
               ...(options.createdBy ? { created_by: options.createdBy } : {}),
             });
-            say(json, quiz, `started ${quiz.id}  ${quiz.path}`);
+            say(json, quiz, `started ${quiz.id}  ${quiz.path}${quiz.local ? '  ·  just for you, on this machine' : ''}`);
           });
         });
 
@@ -425,24 +431,32 @@ const entry: CliEntry = {
         .option('--place <n>', 'its place in the course, from 1; absent, last')
         .option('--created-by <alias>', 'who created it; absent, you')
         .option('--closed', 'keep it closed until someone opens it; absent, it opens as soon as it has a card')
+        .option('--local', 'keep it just for you, on this machine: never committed or synced, and nobody else sees it')
         .option('--json', 'the deck')
-        .action(async (title: string, options: { drawsFrom: string[]; fromQuiz?: string; course?: string; place?: string; createdBy?: string; closed?: boolean }, command: Options) => {
-          await run(command, async (json) => {
-            let made = await api.createDeck({
-              title,
-              draws_from: options.drawsFrom,
-              course: options.course ? store.course(options.course).id : null,
-              place: options.place ? Number(options.place) : null,
-              from_quiz: options.fromQuiz ?? null,
+        .action(
+          async (title: string, options: { drawsFrom: string[]; fromQuiz?: string; course?: string; place?: string; createdBy?: string; closed?: boolean; local?: boolean }, command: Options) => {
+            await run(command, async (json) => {
+              let made = await api.createDeck({
+                ...(options.local ? { local: true } : {}),
+                title,
+                draws_from: options.drawsFrom,
+                course: options.course ? store.course(options.course).id : null,
+                place: options.place ? Number(options.place) : null,
+                from_quiz: options.fromQuiz ?? null,
+              });
+              if (options.createdBy || options.closed) {
+                made = { ...made, ...(options.createdBy ? { created_by: options.createdBy } : {}), ...(options.closed ? { closed: true } : {}) };
+                await store.saveDeck(made);
+                made = store.deck(made.id);
+              }
+              say(
+                json,
+                made,
+                `started ${made.id}  ${made.path}${made.cards.length > 0 ? `  ·  ${made.cards.length} cards from ${made.made_from}` : ''}${made.local ? '  ·  just for you, on this machine' : ''}`,
+              );
             });
-            if (options.createdBy || options.closed) {
-              made = { ...made, ...(options.createdBy ? { created_by: options.createdBy } : {}), ...(options.closed ? { closed: true } : {}) };
-              await store.saveDeck(made);
-              made = store.deck(made.id);
-            }
-            say(json, made, `started ${made.id}  ${made.path}${made.cards.length > 0 ? `  ·  ${made.cards.length} cards from ${made.made_from}` : ''}`);
-          });
-        });
+          },
+        );
       deck
         .command('set')
         .argument('<deck>', "the deck's id")
@@ -663,17 +677,19 @@ const entry: CliEntry = {
         .option('--content <link>', 'a collection, a category (specs/old-testament), or a blueprint id (repeatable)', collect, [] as string[])
         .option('--study-plan <link>', 'where its study plan is, the same way (repeatable)', collect, [] as string[])
         .option('--created-by <alias>', 'who created it; absent, you')
+        .option('--local', 'keep it just for you, on this machine, with quizzes and decks kept just for you in it')
         .option('--json', 'the course')
-        .action(async (title: string, options: { description?: string; content: string[]; studyPlan: string[]; createdBy?: string }, command: Options) => {
+        .action(async (title: string, options: { description?: string; content: string[]; studyPlan: string[]; createdBy?: string; local?: boolean }, command: Options) => {
           await run(command, async (json) => {
             const made = await store.createCourse({
+              local: options.local === true,
               title,
               description: options.description ?? '',
               content: options.content,
               study_plan: options.studyPlan,
               ...(options.createdBy ? { created_by: options.createdBy } : {}),
             });
-            say(json, made, `started ${made.id}  ${made.path}`);
+            say(json, made, `started ${made.id}  ${made.path}${made.local ? '  ·  just for you, on this machine' : ''}`);
           });
         });
       course
@@ -761,6 +777,32 @@ const entry: CliEntry = {
             });
           });
       }
+
+      academy
+        .command('share')
+        .argument('<id>', 'a quiz, a deck, or a course kept just for you')
+        .description(
+          "share it with the project: it moves into the plugin's folder with its id, a course with everything in it, and you become its creator; your attempts stay on this machine as practice",
+        )
+        .option('--json', '{ kind, id, moved, local }')
+        .action(async (id: string, _options: unknown, command: Options) => {
+          await run(command, async (json) => {
+            const done = await api.share(id);
+            say(json, done, `${done.id} is the project's now${done.kind === 'course' ? `, with ${done.moved} quizzes and decks` : ''}`);
+          });
+        });
+
+      academy
+        .command('keep')
+        .argument('<id>', "a quiz, a deck, or a course of the project's")
+        .description("keep it just for you, on this machine, while nobody has an official attempt, a study session, an enrollment, or a guest's attempt on it and it has no public link")
+        .option('--json', '{ kind, id, moved, local }')
+        .action(async (id: string, _options: unknown, command: Options) => {
+          await run(command, async (json) => {
+            const done = await api.keep(id);
+            say(json, done, `${done.id} is just yours now, on this machine`);
+          });
+        });
 
       academy
         .command('move-quizzes')

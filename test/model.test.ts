@@ -53,6 +53,7 @@ const quiz: Quiz = {
   shuffle_options: false,
   guest_name: 'optional',
   path: 'academy/a-quiz.md',
+  local: false,
   questions: [
     { ...blankQuestion('q-one'), prompt: 'First line\n\nSecond paragraph', options: ['Right', 'Wrong'], answer: 0, correct: [0], why: 'Because', reference: 'Page 1' },
     { ...blankQuestion('q-two'), prompt: 'Two', options: ['Wrong', 'Wrong too', 'Right'], answer: 2, correct: [2] },
@@ -285,6 +286,7 @@ const deck: Deck = {
   course: null,
   per_session: 3,
   path: 'academy/a-deck.md',
+  local: false,
   cards: [
     { id: 'c-one', front: 'One\n\nwith a second line', back: 'The first\nback', reference: 'Page 1' },
     { id: 'c-two', front: 'Two', back: 'The second', reference: '' },

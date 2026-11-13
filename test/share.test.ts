@@ -41,6 +41,7 @@ const quiz: Quiz = {
   guest_name: 'optional',
   questions: every,
   path: 'academy/prodigal.md',
+  local: false,
 };
 
 test('the guest copy holds every question as it is asked and no answer, reason, accepted answer, or model answer', () => {
