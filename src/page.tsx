@@ -32,7 +32,7 @@ import {
   type PagePlugin,
   type PluginHost,
 } from 'eidosmd/page';
-import { asPercent, ContextMenu, Delta, Failed, formatDate, HelpMark, LaptopMark, Loading, Stat, Surface, useAct, useData, UserPill, useTrail, type MenuEntry } from './page-kit.tsx';
+import { asPercent, ContextMenu, Delta, DraftActions, DraftNotice, Failed, formatDate, HelpMark, KIT_DRAFTS, LaptopMark, Loading, Stat, Surface, useAct, useData, useDraft, UserPill, useTrail, type MenuEntry } from './page-kit.tsx';
 import type { Attempt, AttemptKind, GuestName, AttemptMode, Card, Comparison, Course, CourseProgress, Deck, DeckProgress, GradeMark, MyScores, PersonResult, Quiz, StudyMode } from './model.ts';
 import { dragRow } from './drag.ts';
 import { answerText, blankQuestion, isRight, QUESTION_TYPE_NAMES, QUESTION_TYPES, referenceLink, responseText, type Question, type QuestionType, type Response } from './question.ts';
@@ -3136,29 +3136,48 @@ function Builder({ view, generate, reload }: { view: QuizView; generate: string 
 
   const dirty = draft !== null;
   const change = (patch: Partial<Question>): void => setDraft({ ...(editing as Question), ...patch });
+  const number = editing ? (draft && !held ? [...quiz.questions, draft] : quiz.questions).findIndex((question) => question.id === editing.id) + 1 : 0;
+  // the question being written, which leaving the page, another question, or a new one asks about first (Unsaved Changes)
+  const writing = useDraft(
+    {
+      dirty,
+      title: `Question ${number}`,
+      save: async () => {
+        if (!draft) return true;
+        if (typeless) throw new Error('Choose a question type first.');
+        await host.put(`question?id=${Q(quiz.id)}`, { question: draft });
+        setPicked(draft.id);
+        setDraft(null);
+        reload();
+        return true;
+      },
+      discard: () => {
+        if (held) setDraft(null);
+        else {
+          setDraft(null);
+          setTypeless(false);
+          setPicked(quiz.questions[0]?.id ?? null);
+        }
+      },
+    },
+    'Could not save the question',
+  );
   const setting = (patch: Partial<Pick<Quiz, 'shuffle_questions' | 'shuffle_options' | 'guest_name'>>): void => {
     void act('Could not change the quiz', async () => {
       await host.put(`quiz?id=${Q(quiz.id)}`, patch);
       reload();
     });
   };
-  const save = async (): Promise<void> => {
-    if (!draft) return;
-    const ok = await act('Could not save the question', () => host.put(`question?id=${Q(quiz.id)}`, { question: draft }));
-    if (ok) {
-      setPicked(draft.id);
-      setDraft(null);
-      reload();
-    }
-  };
-  const add = async (): Promise<void> => {
-    await act('Could not add a question', async () => {
-      const blank = await host.post<Question>(`question/blank?id=${Q(quiz.id)}`);
-      pick(blank.id);
-      setDraft(blank);
-      setTypeless(true);
-    });
-  };
+  const add = (): void =>
+    writing.leave(
+      () =>
+        void act('Could not add a question', async () => {
+          const blank = await host.post<Question>(`question/blank?id=${Q(quiz.id)}`);
+          pick(blank.id);
+          setDraft(blank);
+          setTypeless(true);
+        }),
+    );
   const remove = async (): Promise<void> => {
     if (!held) {
       setDraft(null);
@@ -3185,7 +3204,6 @@ function Builder({ view, generate, reload }: { view: QuizView; generate: string 
   };
   const rows = draft && !held ? [...quiz.questions, draft] : quiz.questions;
   const totalPoints = quiz.questions.reduce((total, question) => total + question.points, 0);
-  const number = editing ? rows.findIndex((question) => question.id === editing.id) + 1 : 0;
   return (
     <>
       {generate && quiz.questions.length === 0 && (
@@ -3205,7 +3223,7 @@ function Builder({ view, generate, reload }: { view: QuizView; generate: string 
             </div>
             <div className="qz-plist">
               {rows.map((question, index) => (
-                <button key={question.id} className="qz-qrow" aria-current={question.id === picked ? 'true' : undefined} onClick={() => pick(question.id)}>
+                <button key={question.id} className="qz-qrow" aria-current={question.id === picked ? 'true' : undefined} onClick={() => question.id !== picked && writing.leave(() => pick(question.id))}>
                   <span className="qz-qnum">{index + 1}</span>
                   <span className="qz-qtext">
                     <span className="qz-one" title={question.prompt}>
@@ -3384,18 +3402,12 @@ function Builder({ view, generate, reload }: { view: QuizView; generate: string 
                   </div>
                 </div>
               )}
+              <DraftNotice draft={writing} />
               <div className="qz-edit-foot">
                 <Text tone="faint" size="sm">
-                  {dirty ? 'Unsaved changes' : 'Past attempts keep each question as it was asked. A regenerated question counts as not yet seen.'}
+                  {dirty ? (KIT_DRAFTS ? '' : 'Unsaved changes') : 'Past attempts keep each question as it was asked. A regenerated question counts as not yet seen.'}
                 </Text>
-                <span className="qz-edit-tools">
-                  <Button disabled={!dirty} onClick={() => (held ? setDraft(null) : void remove())}>
-                    Discard
-                  </Button>
-                  <Button variant="primary" disabled={!dirty || typeless} onClick={save}>
-                    Save
-                  </Button>
-                </span>
+                <DraftActions draft={writing} canSave={!typeless} />
               </div>
             </div>
           )}
@@ -4702,22 +4714,36 @@ function DeckBuilder({ view, generate, reload }: { view: DeckView; generate: str
   const editing = draft ?? held;
   const dirty = draft !== null;
   const change = (patch: Partial<Card>): void => setDraft({ ...(editing as Card), ...patch });
-  const save = async (): Promise<void> => {
-    if (!draft) return;
-    const ok = await act('Could not save the card', () => host.put(`card?id=${Q(deck.id)}`, { card: draft }));
-    if (ok) {
-      setPicked(draft.id);
-      setDraft(null);
-      reload();
-    }
-  };
-  const add = async (): Promise<void> => {
-    await act('Could not add a card', async () => {
-      const blank = await host.post<Card>(`card/blank?id=${Q(deck.id)}`);
-      setPicked(blank.id);
-      setDraft(blank);
-    });
-  };
+  const number = editing ? (draft && !held ? [...deck.cards, draft] : deck.cards).findIndex((card) => card.id === editing.id) + 1 : 0;
+  // the card being written, which leaving the page, another card, or a new one asks about first (Unsaved Changes)
+  const writing = useDraft(
+    {
+      dirty,
+      title: `Card ${number}`,
+      save: async () => {
+        if (!draft) return true;
+        await host.put(`card?id=${Q(deck.id)}`, { card: draft });
+        setPicked(draft.id);
+        setDraft(null);
+        reload();
+        return true;
+      },
+      discard: () => {
+        setDraft(null);
+        if (!held) setPicked(deck.cards[0]?.id ?? null);
+      },
+    },
+    'Could not save the card',
+  );
+  const add = (): void =>
+    writing.leave(
+      () =>
+        void act('Could not add a card', async () => {
+          const blank = await host.post<Card>(`card/blank?id=${Q(deck.id)}`);
+          setPicked(blank.id);
+          setDraft(blank);
+        }),
+    );
   const remove = async (): Promise<void> => {
     if (!held) {
       setDraft(null);
@@ -4796,10 +4822,13 @@ function DeckBuilder({ view, generate, reload }: { view: DeckView; generate: str
                   key={card.id}
                   className="qz-qrow"
                   aria-current={card.id === picked ? 'true' : undefined}
-                  onClick={() => {
-                    setPicked(card.id);
-                    setDraft(null);
-                  }}
+                  onClick={() =>
+                    card.id !== picked &&
+                    writing.leave(() => {
+                      setPicked(card.id);
+                      setDraft(null);
+                    })
+                  }
                 >
                   <span className="qz-muted">{index + 1}</span>
                   <span className="qz-clamp" style={{ flex: 1 }}>
@@ -4859,13 +4888,9 @@ function DeckBuilder({ view, generate, reload }: { view: DeckView; generate: str
                 <div className="qz-flash-rule" />
                 <div className="qz-small">{editing.back || 'The back'}</div>
               </div>
+              <DraftNotice draft={writing} />
               <Row justify="end" gap="sm">
-                <Button disabled={!dirty} onClick={() => (held ? setDraft(null) : void remove())}>
-                  Discard
-                </Button>
-                <Button variant="primary" disabled={!dirty} onClick={save}>
-                  Save
-                </Button>
+                <DraftActions draft={writing} />
               </Row>
               <Text tone="faint" size="sm" block>
                 One fact a card, a short front, a back that stands on its own. Editing a card keeps everyone's progress on it; a regenerated card starts over as not yet seen.

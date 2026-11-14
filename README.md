@@ -52,6 +52,7 @@ Later, **New quiz**, **New deck**, and **New course** on Academy's list start mo
 ## Requirements
 
 - Eidos MD 0.18.0 or later.
+- On Eidos MD 0.26.0 or later, a question or a card you haven't saved asks before it's lost: leaving the page, opening another question or card, or adding a new one asks **Save**, **Discard**, or **Keep editing**, and a save that fails keeps what you wrote and says why. On an older Eidos MD, leaving drops it as before.
 - To generate questions or cards, or to grade with AI: the AI Agent plugin switched on, with your own agent. Everything else works without one.
 
 ## Practice and official attempts

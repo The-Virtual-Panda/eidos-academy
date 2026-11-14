@@ -2,7 +2,7 @@
 // a quiz, a deck, a course, its scores, and a result take Bible Academy's look (Academy REQ36),
 // a surface of the plugin's own, styled only with the page's tokens so a theme holds.
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type JSX, type ReactNode } from 'react';
-import { Notice, SkeletonBar, Stack, useCrumbs, useFileChanges, usePluginHost, type Crumb, type PluginHost } from 'eidosmd/page';
+import { Button, Notice, SaveActions, SaveNotice, SkeletonBar, Stack, useCrumbs, useDirty, useFileChanges, usePluginHost, type Crumb, type Dirty, type PluginHost } from 'eidosmd/page';
 
 export const CSS = `
 .qz { max-width: 880px; margin: 0 auto; padding: 4px 0 56px; font-size: var(--text-body); line-height: 1.6; color: var(--color-fg); }
@@ -505,4 +505,53 @@ export function useAct(): (title: string, work: () => Promise<unknown>) => Promi
     },
     [host],
   );
+}
+
+// ---- a draft held the design kit's way ------------------------------------------------------------
+
+// useDirty, SaveActions, and SaveNotice came with Eidos MD 0.26.0. On it, a question or a card being written is held
+// as every page's unsaved work is: leaving it asks Save, Discard, or Keep editing, and a save that fails keeps it and
+// says why. An older host has none of them, so a draft there is held as it always was, dropped when it is left.
+export const KIT_DRAFTS = typeof useDirty === 'function' && typeof SaveActions === 'function' && typeof SaveNotice === 'function';
+
+type DraftOptions = Parameters<typeof useDirty>[0];
+
+// the host's own on 0.26.0; on an older host, the same shape with leaving never asking and a failed save in a toast
+export const useDraft: (options: DraftOptions, failed: string) => Dirty = KIT_DRAFTS ? (options) => useDirty(options) : usePlainDraft;
+
+function usePlainDraft(options: DraftOptions, failed: string): Dirty {
+  const host: PluginHost = usePluginHost();
+  const [saving, setSaving] = useState(false);
+  const save = async (): Promise<boolean> => {
+    setSaving(true);
+    try {
+      return (await options.save()) !== false;
+    } catch (cause) {
+      host.toast(failed, 'error', message(cause));
+      return false;
+    } finally {
+      setSaving(false);
+    }
+  };
+  return { dirty: options.dirty, saving, failed: null, saved: false, save, discard: options.discard, leave: (then) => then() };
+}
+
+// Discard and Save for a draft: the kit's SaveActions on 0.26.0, the plugin's own two buttons on an older host
+export function DraftActions({ draft, canSave = true }: { draft: Dirty; canSave?: boolean }): JSX.Element {
+  if (KIT_DRAFTS) return <SaveActions draft={draft} />;
+  return (
+    <span className="qz-edit-tools">
+      <Button disabled={!draft.dirty || draft.saving} onClick={draft.discard}>
+        Discard
+      </Button>
+      <Button variant="primary" disabled={!draft.dirty || !canSave || draft.saving} onClick={() => void draft.save()}>
+        Save
+      </Button>
+    </span>
+  );
+}
+
+// why the last save failed, under the form, on a host that says so
+export function DraftNotice({ draft }: { draft: Dirty }): JSX.Element | null {
+  return KIT_DRAFTS ? <SaveNotice draft={draft} /> : null;
 }
