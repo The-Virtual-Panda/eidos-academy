@@ -3464,8 +3464,8 @@ function AiGradeDialog({ quiz, count, onClose }: { quiz: Quiz; count: number; on
         <label className="qz-check">
           <input type="checkbox" checked={accept} onChange={(event: { target: HTMLInputElement }) => setAccept(event.target.checked)} />
           <span>
-            <strong>Accept AI grades without review</strong>
-            <span className="qz-muted qz-small qz-block">The grades are final right away. Off, they wait for you to accept or change each one.</span>
+            <strong>Give the grades right away</strong>
+            <span className="qz-muted qz-small qz-block">Each person gets their grade as soon as your agent grades the answer. Off, the grades wait for you to accept or change each one.</span>
           </span>
         </label>
         <Text tone="faint" size="sm">
@@ -4260,7 +4260,7 @@ function Feedback({ asked, kind, references }: { asked: Asked; kind: AttemptKind
         {kind === 'official' ? (
           <div className="qz-row" style={{ justifyContent: 'flex-start', gap: 8 }}>
             <span className="qz-badge accent">Sent for grading</span>
-            <span className="qz-muted qz-small">A proctor grades this one. Your score is final once they do.</span>
+            <span className="qz-muted qz-small">This one is graded after you send it. Your score is final once it is.</span>
           </div>
         ) : (
           asked.self !== null && <span className={`qz-badge${asked.self ? ' good' : ''}`}>{asked.self ? 'You marked it right' : 'You marked it not quite'}</span>
@@ -4417,7 +4417,7 @@ function Take({ id, kind, mode }: { id: string; kind: AttemptKind; mode: Attempt
                   </div>
                   <div>Points so far, on the questions graded right away</div>
                   <div className="qz-muted qz-small" style={{ marginTop: 6 }}>
-                    Your score is final once a proctor grades the rest. Until then it stays out of the quiz average.
+                    Your score is final once the rest are graded. Until then it stays out of the quiz average.
                   </div>
                 </>
               ) : (
