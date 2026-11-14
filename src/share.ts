@@ -41,6 +41,10 @@ export interface Shown {
   reference: { text: string } | { url: string } | null;
   model?: string;
   covers?: string;
+  // the right answer in the shape the page marks it on, so each option, item, or pair shows whether it was right: the
+  // options checked for check all that are true (by their index as written), the items in their order, and the right side
+  // for each left in turn; absent from a key written before Academy 0.5.1, and for the types that need none
+  key?: number[] | string[];
 }
 
 // A guest's attempt, as guest.js sends it: the quiz, the name given, and an answer by question id, in the shapes
@@ -136,6 +140,13 @@ function compared(question: Question): { compare: string; answer: unknown } | nu
   }
 }
 
+function markedKey(question: Question): Shown['key'] | null {
+  if (question.type === 'all') return [...question.correct].sort((a, b) => a - b);
+  if (question.type === 'order') return [...question.items];
+  if (question.type === 'match') return question.pairs.map((pair) => pair.right);
+  return null;
+}
+
 // The key Eidos scores with (Plugin Share Links REQ20): each question's answer, how it is compared, its points, and what may
 // be shown once it is answered. A written answer has no answer to compare, so Eidos keeps it for a grader.
 export function shareKey(askable: Question[], titleOf: (id: string) => string | null): { questions: Record<string, Record<string, unknown>> } {
@@ -146,6 +157,8 @@ export function shareKey(askable: Question[], titleOf: (id: string) => string | 
       shown.model = question.model;
       shown.covers = question.covers;
     }
+    const key = markedKey(question);
+    if (key) shown.key = key;
     questions[question.id] = { ...(compared(question) ?? {}), points: question.points, shown };
   }
   return { questions };

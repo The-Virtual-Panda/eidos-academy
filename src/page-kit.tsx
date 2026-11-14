@@ -247,6 +247,48 @@ button.qz-add { padding: 2px 8px; border: 1px dashed var(--color-line-strong); b
 .qz-answer { padding: 12px 16px; border: 1px solid var(--color-line); border-radius: var(--radius-2xl); background: var(--color-raised); white-space: pre-wrap; }
 .qz-table button.qz-link { padding: 0; border: 0; background: none; color: var(--color-accent); font: inherit; font-weight: 500; cursor: pointer; }
 .qz-table .qz-one { max-width: 420px; }
+.qz-edit { display: grid; grid-template-columns: minmax(240px, 300px) minmax(0, 1fr); gap: 16px; align-items: start; }
+/* the questions and the quiz's settings stay in view while a long question scrolls */
+.qz-edit-side { position: sticky; top: 12px; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.qz-edit-main { min-width: 0; }
+.qz-panel { min-width: 0; overflow: clip; border: 1px solid var(--color-line); border-radius: var(--radius-xl); background: var(--color-raised); }
+.qz-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 44px; padding: 8px 14px; border-bottom: 1px solid var(--color-line); }
+.qz-panel-title { font-size: var(--text-sm); font-weight: 600; }
+.qz-panel-foot { display: flex; flex-direction: column; gap: 8px; padding: 10px; border-top: 1px solid var(--color-line); }
+.qz-plist { max-height: calc(100vh - 380px); min-height: 120px; overflow-y: auto; overscroll-behavior: contain; }
+.qz-plist .qz-qrow { align-items: flex-start; padding: 9px 12px; }
+.qz-plist .qz-qrow[aria-current] { box-shadow: inset 3px 0 0 var(--color-accent); }
+.qz-qnum { display: inline-flex; flex: none; align-items: center; justify-content: center; min-width: 22px; height: 22px; margin-top: 1px; border-radius: 6px; background: var(--color-hover); color: var(--color-muted); font-size: var(--text-xs); font-weight: 700; font-variant-numeric: tabular-nums; }
+.qz-qrow[aria-current] .qz-qnum { background: var(--color-accent); color: var(--color-on-accent); }
+.qz-addq { width: 100%; min-height: 36px; padding: 6px 10px; border: 1px dashed var(--color-line-strong); border-radius: var(--radius-lg); background: none; color: var(--color-fg); font: inherit; font-size: var(--text-sm); font-weight: 600; cursor: pointer; }
+.qz-addq:hover:not(:disabled) { border-color: var(--color-accent); background: var(--color-accent-soft); color: var(--color-accent); }
+.qz-addq:disabled { opacity: .45; cursor: default; }
+.qz-gen { display: flex; align-items: center; gap: 6px; }
+.qz-gen > :last-child { flex: 1; }
+.qz-gen [data-slot=button] { width: 100%; }
+.qz-gen-count { flex: none; width: 64px; }
+.qz-settings { display: flex; flex-direction: column; gap: 12px; padding: 12px 14px; }
+.qz-edit-head { justify-content: flex-start; flex-wrap: wrap; padding: 8px 10px 8px 16px; }
+.qz-edit-num { font-weight: 700; white-space: nowrap; }
+.qz-edit-type { flex: 0 1 190px; min-width: 150px; }
+.qz-edit-tools { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; }
+.qz-edit-body { display: flex; flex-direction: column; }
+.qz-sec { display: flex; flex-direction: column; gap: 10px; padding: 16px; border-bottom: 1px solid var(--color-line); }
+.qz-sec:last-child { border-bottom: 0; }
+.qz-sec-title { color: var(--color-faint); font-size: var(--text-xs); font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+.qz-extras { display: flex; flex-wrap: wrap; gap: 8px; }
+.qz-extras > div { flex: 1 1 100%; }
+.qz-extras > div:has(> button.qz-add) { flex: none; }
+/* Save stays in reach at the foot of the window however long the question */
+.qz-edit-foot { position: sticky; bottom: 0; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 14px 10px 16px; border-top: 1px solid var(--color-line); background: var(--color-raised); }
+.qz-edit-empty { display: flex; align-items: center; justify-content: center; min-height: 220px; padding: 24px; text-align: center; }
+.qz-grade { display: flex; flex-direction: column; gap: 10px; max-width: 760px; }
+.qz-grade-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.qz-grade-head button { color: var(--color-accent); }
+.qz-grade-card { display: flex; flex-direction: column; gap: 14px; }
+.qz-grade-who { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.qz-grade-foot { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; padding-top: 14px; border-top: 1px solid var(--color-line); }
+@media (max-width: 760px) { .qz-edit { grid-template-columns: 1fr; } .qz-edit-side { position: static; } .qz-plist { max-height: 280px; } }
 @media (max-width: 640px) { .qz-tf, .qz-two { grid-template-columns: 1fr; } .qz-select { width: 100%; min-width: 0; } .qz-row-item { flex-wrap: wrap; } .qz-take { padding-top: 12px; } }
 @media (max-width: 760px) { .qz-h1 { font-size: 26px; } .qz-score { font-size: 68px; } .qz-prompt { font-size: var(--text-2xl); } .qz-qlist { position: static; max-width: none; max-height: 320px; } }
 `;

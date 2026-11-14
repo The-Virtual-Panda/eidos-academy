@@ -307,6 +307,16 @@ function Ask({ label, title, text }: { label: string; title: string; text: strin
   return <AskAgent label={label} title={title} text={text} />;
 }
 
+// The agent's button in a modal: pressing it closes the modal, so the conversation it opens in Chat is not left behind a
+// scrim. The press has already started the conversation by the time the click reaches here.
+function AskAndClose({ label, title, text, onClose }: { label: string; title: string; text: string; onClose: () => void }): JSX.Element {
+  return (
+    <span style={{ display: 'contents' }} onClick={onClose}>
+      <Ask label={label} title={title} text={text} />
+    </span>
+  );
+}
+
 // Generating with questions or cards already there asks first, since the agent adds to them.
 function Generate({ label, title, text, existing, noun, what }: { label: string; title: string; text: string; existing: number; noun: string; what: string }): JSX.Element {
   const [asking, setAsking] = useState(false);
@@ -323,7 +333,7 @@ function Generate({ label, title, text, existing, noun, what }: { label: string;
           foot={
             <Row justify="end" gap="sm">
               <Button onClick={() => setAsking(false)}>Cancel</Button>
-              <Ask label={label} title={title} text={text} />
+              <AskAndClose label={label} title={title} text={text} onClose={() => setAsking(false)} />
             </Row>
           }
         >
@@ -3174,178 +3184,223 @@ function Builder({ view, generate, reload }: { view: QuizView; generate: string 
     });
   };
   const rows = draft && !held ? [...quiz.questions, draft] : quiz.questions;
+  const totalPoints = quiz.questions.reduce((total, question) => total + question.points, 0);
+  const number = editing ? rows.findIndex((question) => question.id === editing.id) + 1 : 0;
   return (
     <>
-      <Row justify="end" wrap gap="sm">
-        <Row gap="sm" wrap>
-          <label className="qz-check">
-            <input type="checkbox" checked={quiz.shuffle_questions} onChange={(event: { target: HTMLInputElement }) => setting({ shuffle_questions: event.target.checked })} /> Shuffle questions
-          </label>
-          <label className="qz-check">
-            <input type="checkbox" checked={quiz.shuffle_options} onChange={(event: { target: HTMLInputElement }) => setting({ shuffle_options: event.target.checked })} /> Shuffle options
-          </label>
-          {/* how a guest from a public link gives their name (Academy REQ70) */}
-          <Row gap="sm" align="center">
-            <span className="qz-small">Guests give their name</span>
-            <Seg aria-label="Guests give their name">
-              {GUEST_NAME_CHOICES.map(([value, label]) => (
-                <SegItem key={value} active={quiz.guest_name === value} selected={quiz.guest_name === value} onClick={() => setting({ guest_name: value })}>
-                  {label}
-                </SegItem>
-              ))}
-            </Seg>
-          </Row>
-          <span style={{ width: 70 }}>
-            <Input aria-label="How many questions to generate" type="number" value={count} onChange={(event: { target: HTMLInputElement }) => setCount(event.target.value)} />
-          </span>
-          <Generate label="Generate questions" title={`Questions: ${quiz.title}`} text={generateText(quiz, Number(count) || 20, alias)} existing={quiz.questions.length} noun="question" what="quiz" />
-          <Button size="sm" onClick={add}>
-            Add question
-          </Button>
-        </Row>
-      </Row>
       {generate && quiz.questions.length === 0 && (
-        <div style={{ marginTop: 12 }}>
+        <div style={{ marginBottom: 14 }}>
           <Notice>Press Generate questions to have your agent write them in Chat. They appear here as it adds them, and your agent opens the quiz once the last one is in.</Notice>
         </div>
       )}
-      {
-        <div className="qz-builder" style={{ marginTop: 14 }}>
-          <div className="qz-qlist">
-            {rows.map((question, index) => (
-              <button key={question.id} className="qz-qrow" aria-current={question.id === picked ? 'true' : undefined} onClick={() => pick(question.id)}>
-                <span className="qz-muted">{index + 1}</span>
-                <span className="qz-qtext">
-                  <span className="qz-one" title={question.prompt}>
-                    {question.prompt || 'New question'}
+      <div className="qz-edit">
+        {/* the questions and how to add more on one side, with the quiz's own settings under them; the question open on the other */}
+        <aside className="qz-edit-side">
+          <div className="qz-panel">
+            <div className="qz-panel-head">
+              <span className="qz-panel-title">Questions</span>
+              <span className="qz-faint qz-small">
+                {quiz.questions.length} · {totalPoints === 1 ? '1 point' : `${totalPoints} points`}
+              </span>
+            </div>
+            <div className="qz-plist">
+              {rows.map((question, index) => (
+                <button key={question.id} className="qz-qrow" aria-current={question.id === picked ? 'true' : undefined} onClick={() => pick(question.id)}>
+                  <span className="qz-qnum">{index + 1}</span>
+                  <span className="qz-qtext">
+                    <span className="qz-one" title={question.prompt}>
+                      {question.prompt || 'New question'}
+                    </span>
+                    <span className="qz-faint qz-small">
+                      {typeless && draft?.id === question.id ? 'No type yet' : QUESTION_TYPE_NAMES[question.type]} · {question.points === 1 ? '1 point' : `${question.points} points`}
+                    </span>
                   </span>
-                  <span className="qz-faint qz-small">
-                    {typeless && draft?.id === question.id ? 'No type yet' : QUESTION_TYPE_NAMES[question.type]} · {question.points === 1 ? '1 point' : `${question.points} points`}
-                  </span>
-                </span>
-              </button>
-            ))}
-            {rows.length === 0 && (
-              <div style={{ padding: 10 }}>
-                <Text tone="muted" size="sm">
-                  No questions yet. Generate them, or add the first by hand.
-                </Text>
-              </div>
-            )}
-          </div>
-          {editing && (
-            <div className="qz-qform">
-              <label>
-                <span className="qz-label">Question type</span>
-                <Select
-                  aria-label="Question type"
-                  required
-                  value={typeless ? '' : editing.type}
-                  onChange={(event: { target: HTMLSelectElement }) => {
-                    const type = event.target.value as QuestionType;
-                    if (!type) return;
-                    setTypeless(false);
-                    setDraft(retyped(editing, type));
-                  }}
-                >
-                  <option value="" disabled>
-                    Choose a question type
-                  </option>
-                  {QUESTION_TYPES.map((type) => (
-                    <option key={type} value={type}>
-                      {QUESTION_TYPE_NAMES[type]}
-                    </option>
-                  ))}
-                </Select>
-              </label>
-              {typeless ? (
-                <Notice>Choose a question type to write the question. Each type asks for its own answer: options, accepted answers, an order, pairs, or a model answer.</Notice>
-              ) : (
-                <>
-                  <div>
-                    <Row justify="between" wrap gap="sm">
-                      <label className="qz-label" htmlFor="qz-prompt" style={{ margin: 0 }}>
-                        Question
-                      </label>
-                      <Row gap="xs" wrap>
-                        {held && <Ask label="Regenerate question" title={`Regenerate: ${held.prompt.slice(0, 40)}`} text={regenerateText(quiz, held)} />}
-                        {held && (
-                          <>
-                            <Button size="sm" variant="quiet" disabled={quiz.questions[0]?.id === held.id} aria-label="Move question up" onClick={() => nudge(held.id, -1)}>
-                              ▲
-                            </Button>
-                            <Button size="sm" variant="quiet" disabled={quiz.questions.at(-1)?.id === held.id} aria-label="Move question down" onClick={() => nudge(held.id, 1)}>
-                              ▼
-                            </Button>
-                          </>
-                        )}
-                        <Button size="sm" variant="quiet" aria-label="Delete question" onClick={remove}>
-                          Delete
-                        </Button>
-                      </Row>
-                    </Row>
-                    <div style={{ marginTop: 4 }}>
-                      <Textarea id="qz-prompt" rows={2} value={editing.prompt} onChange={(event: { target: HTMLTextAreaElement }) => change({ prompt: event.target.value })} />
-                    </div>
-                  </div>
-                  <Extra label="Context" shown={contextOpen || editing.context.trim() !== ''} onOpen={() => setContextOpen(true)} hint="Shown under the question while someone answers it">
-                    <Textarea
-                      aria-label="Context"
-                      rows={2}
-                      placeholder="A passage to read, a hint, or more about what you are asking"
-                      value={editing.context}
-                      onChange={(event: { target: HTMLTextAreaElement }) => change({ context: event.target.value })}
-                    />
-                  </Extra>
-                  <Extra label="Image" shown={imageOpen || editing.image.trim() !== ''} onOpen={() => setImageOpen(true)} hint="An image from the project's assets, shown with the question">
-                    <Input aria-label="Image" placeholder="assets/map.png" value={editing.image} onChange={(event: { target: HTMLInputElement }) => change({ image: event.target.value })} />
-                  </Extra>
-                  <AnswerFields question={editing} change={change} />
-                  <div className="qz-two">
-                    <label>
-                      <span className="qz-label">Points (optional)</span>
-                      <Input
-                        aria-label="Points"
-                        inputMode="numeric"
-                        placeholder="1"
-                        value={editing.points === 1 ? '' : String(editing.points)}
-                        onChange={(event: { target: HTMLInputElement }) => {
-                          const value = event.target.value.trim();
-                          change({ points: value === '' ? 1 : Math.max(0, Math.floor(Number(value)) || 0) });
-                        }}
-                      />
-                    </label>
-                    <div>
-                      <span className="qz-label">Graded</span>
-                      <Text tone="muted" size="sm">
-                        {editing.type === 'written' ? "By the quiz's creator, a proctor, or an owner, after it is taken" : 'Right away'}
-                      </Text>
-                    </div>
-                  </div>
-                  {editing.type !== 'written' && (
-                    <label>
-                      <span className="qz-label">Why this is the answer</span>
-                      <Textarea rows={3} value={editing.why} onChange={(event: { target: HTMLTextAreaElement }) => change({ why: event.target.value })} />
-                    </label>
-                  )}
-                  <ReferencePicker value={editing.reference} references={view.references} drawsFrom={quiz.draws_from} onChange={(reference) => change({ reference })} />
-                </>
+                </button>
+              ))}
+              {rows.length === 0 && (
+                <div style={{ padding: 12 }}>
+                  <Text tone="muted" size="sm">
+                    No questions yet. Generate them, or add the first by hand.
+                  </Text>
+                </div>
               )}
-              <Row justify="end" gap="sm">
-                <Button disabled={!dirty} onClick={() => (held ? setDraft(null) : void remove())}>
-                  Discard
-                </Button>
-                <Button variant="primary" disabled={!dirty || typeless} onClick={save}>
-                  Save
-                </Button>
-              </Row>
-              <Text tone="faint" size="sm" block>
-                Past attempts keep each question as it was asked. A regenerated question counts as not yet seen.
-              </Text>
+            </div>
+            <div className="qz-panel-foot">
+              <button type="button" className="qz-addq" onClick={add} disabled={draft !== null && !held}>
+                + Add question
+              </button>
+              <div className="qz-gen">
+                <span className="qz-gen-count">
+                  <Input aria-label="How many questions to generate" type="number" min={1} value={count} onChange={(event: { target: HTMLInputElement }) => setCount(event.target.value)} />
+                </span>
+                <Generate label="Generate questions" title={`Questions: ${quiz.title}`} text={generateText(quiz, Number(count) || 20, alias)} existing={quiz.questions.length} noun="question" what="quiz" />
+              </div>
+            </div>
+          </div>
+          <div className="qz-panel">
+            <div className="qz-panel-head">
+              <span className="qz-panel-title">Quiz settings</span>
+            </div>
+            <div className="qz-settings">
+              <label className="qz-check">
+                <input type="checkbox" checked={quiz.shuffle_questions} onChange={(event: { target: HTMLInputElement }) => setting({ shuffle_questions: event.target.checked })} />
+                <span>
+                  Shuffle questions
+                  <span className="qz-faint qz-block">A new order for each attempt</span>
+                </span>
+              </label>
+              <label className="qz-check">
+                <input type="checkbox" checked={quiz.shuffle_options} onChange={(event: { target: HTMLInputElement }) => setting({ shuffle_options: event.target.checked })} />
+                <span>
+                  Shuffle options
+                  <span className="qz-faint qz-block">Choices in a new order each time</span>
+                </span>
+              </label>
+              {/* how a guest from a public link gives their name (Academy REQ70) */}
+              <div>
+                <span className="qz-label">Guests give their name</span>
+                <Seg aria-label="Guests give their name">
+                  {GUEST_NAME_CHOICES.map(([value, label]) => (
+                    <SegItem key={value} active={quiz.guest_name === value} selected={quiz.guest_name === value} onClick={() => setting({ guest_name: value })}>
+                      {label}
+                    </SegItem>
+                  ))}
+                </Seg>
+              </div>
+            </div>
+          </div>
+        </aside>
+        <section className="qz-edit-main">
+          {!editing ? (
+            <div className="qz-panel qz-edit-empty">
+              <Text tone="muted">{rows.length === 0 ? 'Add a question or generate a set to start writing the quiz.' : 'Pick a question to edit it.'}</Text>
+            </div>
+          ) : (
+            <div className="qz-panel">
+              <div className="qz-panel-head qz-edit-head">
+                <span className="qz-edit-num">Question {number}</span>
+                <span className="qz-edit-type">
+                  <Select
+                    aria-label="Question type"
+                    required
+                    value={typeless ? '' : editing.type}
+                    onChange={(event: { target: HTMLSelectElement }) => {
+                      const type = event.target.value as QuestionType;
+                      if (!type) return;
+                      setTypeless(false);
+                      setDraft(retyped(editing, type));
+                    }}
+                  >
+                    <option value="" disabled>
+                      Choose a question type
+                    </option>
+                    {QUESTION_TYPES.map((type) => (
+                      <option key={type} value={type}>
+                        {QUESTION_TYPE_NAMES[type]}
+                      </option>
+                    ))}
+                  </Select>
+                </span>
+                <span className="qz-edit-tools">
+                  {held && <Ask label="Regenerate" title={`Regenerate: ${held.prompt.slice(0, 40)}`} text={regenerateText(quiz, held)} />}
+                  {held && (
+                    <>
+                      <Button size="sm" variant="quiet" disabled={quiz.questions[0]?.id === held.id} aria-label="Move question up" data-tip="Move up" onClick={() => nudge(held.id, -1)}>
+                        ↑
+                      </Button>
+                      <Button size="sm" variant="quiet" disabled={quiz.questions.at(-1)?.id === held.id} aria-label="Move question down" data-tip="Move down" onClick={() => nudge(held.id, 1)}>
+                        ↓
+                      </Button>
+                    </>
+                  )}
+                  <Button size="sm" variant="quiet" aria-label="Delete question" onClick={remove}>
+                    Delete
+                  </Button>
+                </span>
+              </div>
+              {typeless ? (
+                <div className="qz-edit-body">
+                  <Notice>Choose a question type to write the question. Each type asks for its own answer: options, accepted answers, an order, pairs, or a model answer.</Notice>
+                </div>
+              ) : (
+                <div className="qz-edit-body">
+                  <div className="qz-sec">
+                    <label className="qz-sec-title" htmlFor="qz-prompt">
+                      Question
+                    </label>
+                    <Textarea id="qz-prompt" rows={2} placeholder="What do you want to ask?" value={editing.prompt} onChange={(event: { target: HTMLTextAreaElement }) => change({ prompt: event.target.value })} />
+                    <div className="qz-extras">
+                      <Extra label="Context" shown={contextOpen || editing.context.trim() !== ''} onOpen={() => setContextOpen(true)} hint="Shown under the question while someone answers it">
+                        <Textarea
+                          aria-label="Context"
+                          rows={2}
+                          placeholder="A passage to read, a hint, or more about what you are asking"
+                          value={editing.context}
+                          onChange={(event: { target: HTMLTextAreaElement }) => change({ context: event.target.value })}
+                        />
+                      </Extra>
+                      <Extra label="Image" shown={imageOpen || editing.image.trim() !== ''} onOpen={() => setImageOpen(true)} hint="An image from the project's assets, shown with the question">
+                        <Input aria-label="Image" placeholder="assets/map.png" value={editing.image} onChange={(event: { target: HTMLInputElement }) => change({ image: event.target.value })} />
+                      </Extra>
+                    </div>
+                  </div>
+                  <div className="qz-sec">
+                    <span className="qz-sec-title">Answer</span>
+                    <AnswerFields question={editing} change={change} />
+                  </div>
+                  <div className="qz-sec">
+                    <span className="qz-sec-title">{editing.type === 'written' ? 'Source' : 'Explanation'}</span>
+                    {editing.type !== 'written' && (
+                      <label>
+                        <span className="qz-label">Why this is the answer</span>
+                        <Textarea rows={3} value={editing.why} onChange={(event: { target: HTMLTextAreaElement }) => change({ why: event.target.value })} />
+                      </label>
+                    )}
+                    <ReferencePicker value={editing.reference} references={view.references} drawsFrom={quiz.draws_from} onChange={(reference) => change({ reference })} />
+                  </div>
+                  <div className="qz-sec">
+                    <span className="qz-sec-title">Scoring</span>
+                    <div className="qz-two">
+                      <label>
+                        <span className="qz-label">Points</span>
+                        <Input
+                          aria-label="Points"
+                          inputMode="numeric"
+                          placeholder="1"
+                          value={editing.points === 1 ? '' : String(editing.points)}
+                          onChange={(event: { target: HTMLInputElement }) => {
+                            const value = event.target.value.trim();
+                            change({ points: value === '' ? 1 : Math.max(0, Math.floor(Number(value)) || 0) });
+                          }}
+                        />
+                      </label>
+                      <div>
+                        <span className="qz-label">Graded</span>
+                        <Text tone="muted" size="sm">
+                          {editing.type === 'written' ? "By the quiz's creator, a proctor, or an owner, after it is taken" : 'Right away'}
+                        </Text>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+              <div className="qz-edit-foot">
+                <Text tone="faint" size="sm">
+                  {dirty ? 'Unsaved changes' : 'Past attempts keep each question as it was asked. A regenerated question counts as not yet seen.'}
+                </Text>
+                <span className="qz-edit-tools">
+                  <Button disabled={!dirty} onClick={() => (held ? setDraft(null) : void remove())}>
+                    Discard
+                  </Button>
+                  <Button variant="primary" disabled={!dirty || typeless} onClick={save}>
+                    Save
+                  </Button>
+                </span>
+              </div>
             </div>
           )}
-        </div>
-      }
+        </section>
+      </div>
     </>
   );
 }
@@ -3400,7 +3455,7 @@ function AiGradeDialog({ quiz, count, onClose }: { quiz: Quiz; count: number; on
       foot={
         <Row justify="end" gap="sm">
           <Button onClick={onClose}>Cancel</Button>
-          <Ask label="Grade" title={`Grade: ${quiz.title}`} text={gradeText(quiz, host.user?.alias ?? null, accept, null)} />
+          <AskAndClose label="Grade" title={`Grade: ${quiz.title}`} text={gradeText(quiz, host.user?.alias ?? null, accept, null)} onClose={onClose} />
         </Row>
       }
     >
@@ -3421,66 +3476,56 @@ function AiGradeDialog({ quiz, count, onClose }: { quiz: Quiz; count: number; on
   );
 }
 
-function GradeDialog({
+// One written answer graded in the page itself, not over it, so the person's agent in Chat stays in reach while they grade
+// (to read or copy what it says), and a grade it suggests appears here as soon as it is recorded. `answer` is drawn from the
+// To grade data as it now stands, and the panel is keyed by the answer, so a redraw after a file change keeps what the
+// grader has typed while the next answer opens with its own grade.
+function GradePanel({
   quiz,
-  answers,
-  start,
+  answer,
+  at,
+  count,
   references,
+  onSkip,
   onClose,
   onSaved,
 }: {
   quiz: Quiz;
-  answers: WaitingAnswer_[];
-  start: number;
+  answer: WaitingAnswer_;
+  at: number;
+  count: number;
   references: Referenced[];
+  onSkip: () => void;
   onClose: () => void;
   onSaved: () => void;
 }): JSX.Element {
   const host = usePluginHost();
   const act = useAct();
-  const [at, setAt] = useState(start);
-  const answer = answers[at];
-  const held = answer?.grade ?? null;
+  const held = answer.grade ?? null;
   const [points, setPoints] = useState<number | null>(held?.points ?? null);
   const [note, setNote] = useState(held?.note ?? '');
-  useEffect(() => {
-    setPoints(answer?.grade?.points ?? null);
-    setNote(answer?.grade?.note ?? '');
-  }, [answer]);
-  if (!answer) {
-    onClose();
-    return <></>;
-  }
-  const { question } = answer;
-  const next = (): void => (at + 1 < answers.length ? setAt(at + 1) : onClose());
+  const { question, suggestion } = answer;
   const save = async (): Promise<void> => {
     if (points === null) return;
     const ok = await act('Could not save the grade', () => host.post('grade', { quiz: quiz.id, attempt: answer.attempt, question: question.id, points, note }));
-    if (ok) {
-      onSaved();
-      next();
-    }
+    if (ok) onSaved();
   };
   return (
-    <Modal
-      title={answer.name}
-      size="lg"
-      onClose={onClose}
-      foot={
-        <Row justify="between" gap="sm" wrap>
-          <Text tone="muted" size="sm">
-            {at + 1} of {answers.length} · {formatDate(answer.completed_at)}
-          </Text>
-          <Row gap="sm">
-            <Button onClick={next}>Skip</Button>
-            <Button variant="primary" disabled={points === null} onClick={save}>
-              Save grade and next
-            </Button>
-          </Row>
-        </Row>
-      }
-    >
-      <Stack gap="md" pad="md">
+    <section className="qz-grade" aria-label={`Grading ${answer.name}'s answer`}>
+      <div className="qz-grade-head">
+        <button type="button" className="qz-link qz-small qz-quiet-link" onClick={onClose}>
+          ← All answers
+        </button>
+        <span className="qz-muted qz-small">
+          {at + 1} of {count}
+        </span>
+      </div>
+      <div className="qz-card qz-grade-card">
+        <div className="qz-grade-who">
+          <strong>{answer.name}</strong>
+          {answer.guest && <span className="qz-badge accent">Guest</span>}
+          <span className="qz-faint qz-small">{formatDate(answer.completed_at)}</span>
+        </div>
         <Text weight="strong">{question.prompt}</Text>
         {question.context.trim() && (
           <Text tone="muted" size="sm">
@@ -3507,7 +3552,7 @@ function GradeDialog({
             <span className="qz-label" style={{ margin: 0 }}>
               Points, out of {question.points}
             </span>
-            {!answer.suggestion && <Ask label="Suggest a grade" title={`Suggest a grade: ${answer.name}`} text={gradeText(quiz, host.user?.alias ?? null, false, answer)} />}
+            {!suggestion && <Ask label="Suggest a grade" title={`Suggest a grade: ${answer.name}`} text={gradeText(quiz, host.user?.alias ?? null, false, answer)} />}
           </Row>
           <div className="qz-pts" role="group" aria-label="Points">
             {Array.from({ length: question.points + 1 }, (_, value) => (
@@ -3516,22 +3561,22 @@ function GradeDialog({
               </button>
             ))}
           </div>
-          {answer.suggestion && (
+          {suggestion && (
             <div className="qz-suggest">
               <strong>
-                {answer.suggestion.ai ? 'Your agent suggests' : 'Suggested'} {answer.suggestion.points} of {question.points}.
+                {suggestion.ai ? 'Your agent suggests' : 'Suggested'} {suggestion.points} of {question.points}.
               </strong>{' '}
-              {answer.suggestion.note}
+              {suggestion.note}
               <div className="qz-muted qz-small">A suggestion only. The grade is yours.</div>
               <div style={{ marginTop: 8 }}>
                 <Button
                   size="sm"
                   onClick={() => {
-                    setPoints(answer.suggestion!.points);
-                    setNote(answer.suggestion!.note);
+                    setPoints(suggestion.points);
+                    setNote(suggestion.note);
                   }}
                 >
-                  Use {answer.suggestion.points} and its note
+                  Use {suggestion.points} and its note
                 </Button>
               </div>
             </div>
@@ -3541,23 +3586,56 @@ function GradeDialog({
           <span className="qz-label">Note to {answer.name} (optional)</span>
           <Textarea rows={2} value={note} onChange={(event: { target: HTMLTextAreaElement }) => setNote(event.target.value)} />
         </label>
-      </Stack>
-    </Modal>
+        <div className="qz-grade-foot">
+          <Button onClick={onSkip}>{at + 1 < count ? 'Skip' : 'Skip and finish'}</Button>
+          <Button variant="primary" disabled={points === null} onClick={save}>
+            {at + 1 < count ? 'Save grade and next' : 'Save grade and finish'}
+          </Button>
+        </div>
+      </div>
+    </section>
   );
 }
 
 function GradingTab({ view, reloadQuiz }: { view: QuizView; reloadQuiz: () => void }): JSX.Element {
   const { data, error, reload } = useData<ToGradeView>(`to-grade?id=${Q(view.quiz.id)}`);
   const [show, setShow] = useState<'waiting' | 'graded'>('waiting');
-  const [grading, setGrading] = useState<{ list: WaitingAnswer_[]; at: number } | null>(null);
+  // the answers being walked through, by attempt and question, in the order the walk began: grading one moves it from
+  // Waiting to Graded, and the walk goes on to the next rather than shifting under the grader
+  const [grading, setGrading] = useState<{ keys: string[]; at: number } | null>(null);
   const [ai, setAi] = useState(false);
   if (error) return <Notice tone="error">{error}</Notice>;
   if (!data) return <SkeletonBar />;
   const rows = show === 'waiting' ? data.waiting : data.graded;
-  const saved = (): void => {
-    reload();
-    reloadQuiz();
-  };
+  const keyOf = (answer: WaitingAnswer_): string => `${answer.attempt}/${answer.question.id}`;
+  const walk = (list: WaitingAnswer_[], at: number): void => setGrading({ keys: list.map(keyOf), at });
+  if (grading) {
+    const wanted = grading.keys[grading.at];
+    const answer = [...data.waiting, ...data.graded].find((each) => keyOf(each) === wanted) ?? null;
+    const next = (): void => (grading.at + 1 < grading.keys.length ? setGrading({ ...grading, at: grading.at + 1 }) : setGrading(null));
+    if (!answer) {
+      // removed since the walk began (a guest's attempt taken away): go on to the next
+      queueMicrotask(next);
+      return <SkeletonBar />;
+    }
+    return (
+      <GradePanel
+        key={wanted}
+        quiz={view.quiz}
+        answer={answer}
+        at={grading.at}
+        count={grading.keys.length}
+        references={view.references}
+        onSkip={next}
+        onClose={() => setGrading(null)}
+        onSaved={() => {
+          reload();
+          reloadQuiz();
+          next();
+        }}
+      />
+    );
+  }
   return (
     <>
       <Row justify="between" wrap gap="sm">
@@ -3573,7 +3651,7 @@ function GradingTab({ view, reloadQuiz }: { view: QuizView; reloadQuiz: () => vo
           <Button size="sm" variant="accent" disabled={data.waiting.length === 0} onClick={() => setAi(true)}>
             Grade with AI
           </Button>
-          <Button size="sm" variant="primary" disabled={data.waiting.length === 0} onClick={() => setGrading({ list: data.waiting, at: 0 })}>
+          <Button size="sm" variant="primary" disabled={data.waiting.length === 0} onClick={() => walk(data.waiting, 0)}>
             Start grading
           </Button>
         </Row>
@@ -3598,7 +3676,7 @@ function GradingTab({ view, reloadQuiz }: { view: QuizView; reloadQuiz: () => vo
                 return (
                   <tr key={`${answer.attempt}-${answer.question.id}`}>
                     <td>
-                      <button type="button" className="qz-link" onClick={() => setGrading({ list: rows, at: index })}>
+                      <button type="button" className="qz-link" onClick={() => walk(rows, index)}>
                         {answer.name}
                       </button>
                       {answer.guest && (
@@ -3632,7 +3710,6 @@ function GradingTab({ view, reloadQuiz }: { view: QuizView; reloadQuiz: () => vo
         wait here: in practice, a person marks their own written answers against the model answer.
       </Text>
       {ai && <AiGradeDialog quiz={view.quiz} count={data.waiting.length} onClose={() => setAi(false)} />}
-      {grading && <GradeDialog quiz={view.quiz} answers={grading.list} start={grading.at} references={view.references} onClose={() => setGrading(null)} onSaved={saved} />}
     </>
   );
 }

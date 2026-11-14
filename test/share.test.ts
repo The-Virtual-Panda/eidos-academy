@@ -84,6 +84,15 @@ test('the key holds each answer as Eidos compares it, its points, and what may b
   assert.deepEqual(held['q-written']?.['shown'], { right: 'Grace before merit.', why: '', reference: null, model: 'Grace before merit.', covers: 'grace, merit' });
 });
 
+test('what is shown once a question is answered holds its answer in the shape the guest page marks each option, item, or pair on', () => {
+  const held = shareKey(every, () => null).questions;
+  const keyOf = (id: string): unknown => (held[id]?.['shown'] as { key?: unknown }).key;
+  assert.deepEqual(keyOf('q-all'), [0, 2]);
+  assert.deepEqual(keyOf('q-order'), ['Genesis', 'Exodus', 'Leviticus', 'Numbers']);
+  assert.deepEqual(keyOf('q-match'), ['Dwelling place', 'Holy place', 'Tent']);
+  for (const id of ['q-choice', 'q-tf', 'q-short', 'q-written']) assert.equal(keyOf(id), undefined, `${id} needs no key of this shape`);
+});
+
 test('a reference reads as words a guest can use: a blueprint by its title, an asset by its name, and a web link as a link', () => {
   const titleOf = (): string | null => null;
   assert.deepEqual(guestReference('assets/maps/sinai.png', titleOf), { text: 'sinai.png' });

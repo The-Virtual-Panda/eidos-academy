@@ -60,7 +60,12 @@ html, body { background: var(--canvas); }
 .qg .row > span { flex: 1; }
 .qg .row.sortable { cursor: grab; user-select: none; } .qg .row.held { border-color: var(--accent); box-shadow: 0 8px 24px rgb(0 0 0 / .14); cursor: grabbing; }
 .qg .row .grip { flex: none; padding: 4px 2px; color: var(--muted); font-size: 18px; font-weight: 400; line-height: 1; touch-action: none; cursor: grab; }
-.qg .pair { margin: 0 0 12px; } .qg .pair > span { display: block; font-weight: 600; margin-bottom: 4px; }
+.qg .pair { margin: 0 0 12px; } .qg .pair > label > span { display: block; font-weight: 600; margin-bottom: 4px; }
+.qg .row.right, .qg input.text.right, .qg select.right { border-color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, var(--raised)); }
+.qg .row.wrong, .qg input.text.wrong, .qg select.wrong { border-color: var(--err); background: color-mix(in srgb, var(--err) 12%, var(--raised)); }
+.qg .option .tag, .qg .row .tag { flex: none; margin-left: auto; font-size: 12.5px; font-weight: 600; }
+.qg .tag.ok { color: var(--ok); } .qg .tag.no { color: var(--err); }
+.qg .pair .says { display: block; margin-top: 4px; color: var(--ok); font-size: 13px; font-weight: 600; }
 .qg button.btn { display: inline-flex; align-items: center; justify-content: center; min-height: 46px; padding: 10px 22px; border: 1px solid var(--accent);
   border-radius: 99px; background: var(--accent); color: var(--on-accent); font: inherit; font-weight: 600; cursor: pointer; }
 .qg button.btn:disabled { opacity: .45; cursor: default; }
@@ -277,15 +282,33 @@ const draw: GuestDraw<HTMLElement> = (root: HTMLElement, eidos: GuestHost) => {
     let read: () => Answer | null = () => null;
     // put in order draws its arrows from whether it is locked, so it is drawn again on either
     let repaint: (() => void) | null = null;
+    // marks each option, item, or pair right or wrong once Eidos has checked the answer, from the key's shape of it
+    let mark: ((said: Shown | null, right: boolean | null) => void) | null = null;
     if (question.type === 'all') {
       const shown = copy!.shuffle_options ? shuffled(question.options.map((_, index) => index)) : question.options.map((_, index) => index);
       const boxes = new Map<number, HTMLInputElement>();
+      const labels = new Map<number, HTMLLabelElement>();
       for (const index of shown) {
         const box = el('input', { type: 'checkbox' });
+        const label = el('label', { class: 'option' }, box, question.options[index] ?? '');
         boxes.set(index, box);
+        labels.set(index, label);
         controls.push(box);
-        form.append(el('label', { class: 'option' }, box, question.options[index] ?? ''));
+        form.append(label);
       }
+      mark = (said) => {
+        const key = said?.key;
+        if (!Array.isArray(key)) return;
+        for (const [index, label] of labels) {
+          const correct = (key as unknown[]).includes(index);
+          const chose = boxes.get(index)?.checked === true;
+          if (correct) label.classList.add('right');
+          else if (chose) label.classList.add('wrong');
+          // a true option left unchecked reads apart from one checked, since both are drawn as right
+          if (correct && !chose) label.append(el('span', { class: 'tag ok' }, 'Missed'));
+          if (!correct && chose) label.append(el('span', { class: 'tag no' }, 'Not true'));
+        }
+      };
       read = () =>
         [...boxes]
           .filter(([, box]) => box.checked)
@@ -298,11 +321,14 @@ const draw: GuestDraw<HTMLElement> = (root: HTMLElement, eidos: GuestHost) => {
       form.append(el('label', { class: 'field', for: id }, question.type === 'short' ? 'Your answer' : 'Your answer, in your own words'), field, el('div', { class: 'gap' }));
       if (field instanceof HTMLInputElement) field.addEventListener('keydown', (event) => event.key === 'Enter' && !check.disabled && check.click());
       read = () => (field.value.trim() === '' ? null : field.value.trim());
+      if (question.type === 'short') mark = (_said, right) => right !== null && field.classList.add(right ? 'right' : 'wrong');
     } else if (question.type === 'order') {
       const items = [...question.items];
       const list = el('ol', { style: 'list-style:none;margin:0;padding:0', 'aria-label': 'Items, in the order you put them' });
       // the item being dragged, drawn lifted
       let held: string | null = null;
+      // the items in their right order, once the answer is checked
+      let rightOrder: string[] | null = null;
       const paint = (): void => {
         list.replaceChildren(
           ...items.map((item, index) => {
@@ -312,6 +338,16 @@ const draw: GuestDraw<HTMLElement> = (root: HTMLElement, eidos: GuestHost) => {
             down.setAttribute('aria-label', `Move ${item} down`);
             up.disabled = index === 0 || check.disabled;
             down.disabled = index === items.length - 1 || check.disabled;
+            if (rightOrder) {
+              const belongs = rightOrder.indexOf(item);
+              const placed = belongs === index;
+              return el(
+                'li',
+                { class: `row ${placed ? 'right' : 'wrong'}` },
+                el('span', {}, `${index + 1} · ${item}`),
+                el('span', { class: `tag ${placed ? 'ok' : 'no'}` }, placed ? 'In place' : belongs >= 0 ? `Goes ${belongs + 1}` : 'Not in place'),
+              );
+            }
             if (check.disabled) return el('li', { class: 'row' }, el('span', {}, `${index + 1} · ${item}`), up, down);
             const row = el(
               'li',
@@ -349,6 +385,11 @@ const draw: GuestDraw<HTMLElement> = (root: HTMLElement, eidos: GuestHost) => {
       form.append(list, el('p', { class: 'faint' }, 'Drag each one into place, or move it with the arrows.'), el('div', { class: 'gap' }));
       read = () => [...items];
       repaint = paint;
+      mark = (said) => {
+        if (!Array.isArray(said?.key)) return;
+        rightOrder = (said.key as unknown[]).map(String);
+        paint();
+      };
     } else if (question.type === 'match') {
       const selects: HTMLSelectElement[] = [];
       question.lefts.forEach((left, index) => {
@@ -358,13 +399,25 @@ const draw: GuestDraw<HTMLElement> = (root: HTMLElement, eidos: GuestHost) => {
         controls.push(select);
         form.append(el('div', { class: 'pair' }, el('label', { for: id }, el('span', {}, left)), select));
       });
+      mark = (said) => {
+        const key = said?.key;
+        if (!Array.isArray(key)) return;
+        selects.forEach((select, index) => {
+          const wanted = String(key[index] ?? '');
+          const placed = select.value === wanted;
+          select.classList.add(placed ? 'right' : 'wrong');
+          if (!placed) select.after(el('span', { class: 'says' }, `Answer: ${wanted}`));
+        });
+      };
       read = () => (selects.some((select) => select.value === '') ? null : selects.map((select) => select.value));
     }
     controls.push(check);
     form.append(check);
     return {
-      lock: () => {
+      lock: (said, right) => {
         lockAll();
+        check.remove();
+        mark?.(said, right);
         repaint?.();
       },
       unlock: () => {
