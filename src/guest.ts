@@ -4,6 +4,7 @@
 // word of the guest copy, are drawn as text and never as markup.
 import type { GuestDraw, GuestHost, GuestResult } from 'eidosmd/guest';
 import { dragRow } from './drag.ts';
+import { guestTranslator, type GuestStrings } from './guest-strings.ts';
 import type { GuestCopy, GuestQuestion, Shown } from './share.ts';
 
 type Answer = number | number[] | string | string[];
@@ -14,14 +15,16 @@ interface Checked {
   shown: Shown | null;
 }
 
-const TYPE_NAMES: Record<string, string> = {
-  choice: 'Multiple choice',
-  truefalse: 'True or false',
-  all: 'Check all that are true',
-  short: 'Short answer',
-  order: 'Put in order',
-  match: 'Match',
-  written: 'Written answer',
+type Translate = ReturnType<typeof guestTranslator>;
+
+const TYPE_NAMES: Record<string, keyof GuestStrings> = {
+  choice: 'typeChoice',
+  truefalse: 'typeTruefalse',
+  all: 'typeAll',
+  short: 'typeShort',
+  order: 'typeOrder',
+  match: 'typeMatch',
+  written: 'typeWritten',
 };
 
 const STYLE = `
@@ -122,18 +125,22 @@ function readCopy(text: string): GuestCopy | null {
   }
 }
 
+const percent = (points: number, of: number): number => (of > 0 ? Math.round((points / of) * 100) : 0);
+
 const isShown = (value: unknown): value is Shown => typeof value === 'object' && value !== null && typeof (value as Shown).right === 'string';
 
 // What Eidos said when it did not take an answer or an attempt, in words a guest can act on.
-function problemOf(result: GuestResult): string {
-  if (result.code === 'limit') return 'Too many were sent from here just now. Wait a few minutes and try again.';
-  if (result.code === 'not-taking-responses') return 'This link is not taking answers.';
-  if (result.code === 'too-large' || result.code === 'refused') return 'This is too large to send.';
-  return "It didn't reach Eidos. Try again.";
+function problemOf(result: GuestResult, t: Translate): string {
+  if (result.code === 'limit') return t('problemLimit');
+  if (result.code === 'not-taking-responses') return t('problemNotTaking');
+  if (result.code === 'too-large' || result.code === 'refused') return t('problemTooLarge');
+  return t('problemUnreached');
 }
 
 const draw: GuestDraw<HTMLElement> = (root: HTMLElement, eidos: GuestHost) => {
   document.head.append(el('style', {}, STYLE));
+  const t = guestTranslator(eidos.locale);
+  const pointsText = (count: number): string => (count === 1 ? t('pointsOne') : t('pointsOther', { count }));
   let copy = readCopy(eidos.guest);
   if (!copy) throw new Error('the guest copy is not an Academy quiz');
   eidos.changed((next) => {
@@ -163,14 +170,14 @@ const draw: GuestDraw<HTMLElement> = (root: HTMLElement, eidos: GuestHost) => {
     const about = el(
       'p',
       { class: 'muted' },
-      `${quiz.questions.length} ${quiz.questions.length === 1 ? 'question' : 'questions'} · ${points} ${points === 1 ? 'point' : 'points'} · one question at a time, and each answer shows whether it is right as you give it.`,
+      t('about', { questions: quiz.questions.length === 1 ? t('questionsOne') : t('questionsOther', { count: quiz.questions.length }), points: pointsText(points) }),
     );
     if (quiz.questions.length === 0) {
-      show(el('h1', { tabindex: '-1', 'data-focus': '' }, quiz.title), el('p', { class: 'muted' }, 'This quiz has no questions to ask yet.'));
+      show(el('h1', { tabindex: '-1', 'data-focus': '' }, quiz.title), el('p', { class: 'muted' }, t('noQuestions')));
       return;
     }
     const begin = button(
-      'Begin',
+      t('begin'),
       () => {
         name = input ? input.value.trim() || null : null;
         if (quiz.guest_name === 'required' && !name) return;
@@ -190,9 +197,9 @@ const draw: GuestDraw<HTMLElement> = (root: HTMLElement, eidos: GuestHost) => {
       input.addEventListener('input', () => (begin.disabled = required && input!.value.trim() === ''));
       input.addEventListener('keydown', (event) => event.key === 'Enter' && !begin.disabled && begin.click());
       parts.push(
-        el('label', { class: 'field', for: 'qg-name' }, required ? 'Your name' : 'Your name (optional)'),
+        el('label', { class: 'field', for: 'qg-name' }, required ? t('yourName') : t('yourNameOptional')),
         input,
-        el('p', { class: 'faint' }, 'The team that shared this sees it beside your answers.'),
+        el('p', { class: 'faint' }, t('nameSeen')),
         el('div', { class: 'gap' }),
       );
     }
@@ -204,12 +211,13 @@ const draw: GuestDraw<HTMLElement> = (root: HTMLElement, eidos: GuestHost) => {
     stage = 'question';
     const question = order[at]!;
     const total = order.length;
+    const typeKey = TYPE_NAMES[question.type];
     const head = el(
       'div',
       { class: 'chips' },
-      el('span', { class: 'chip' }, TYPE_NAMES[question.type] ?? question.type),
-      el('span', { class: 'chip' }, `${question.points} ${question.points === 1 ? 'point' : 'points'}`),
-      el('span', { class: 'pos', 'aria-label': `Question ${at + 1} of ${total}` }, `${at + 1} / ${total}`),
+      el('span', { class: 'chip' }, typeKey ? t(typeKey) : question.type),
+      el('span', { class: 'chip' }, pointsText(question.points)),
+      el('span', { class: 'pos', 'aria-label': t('questionOf', { at: at + 1, total }) }, `${at + 1} / ${total}`),
     );
     const bar = el('div', { class: 'track', role: 'progressbar', 'aria-valuemin': '0', 'aria-valuemax': String(total), 'aria-valuenow': String(at) });
     const fill = el('div');
@@ -235,7 +243,7 @@ const draw: GuestDraw<HTMLElement> = (root: HTMLElement, eidos: GuestHost) => {
       const buttons = new Map<number, HTMLButtonElement>();
       // a click picks an answer and Check answer gives it, so a guest can think it over before it counts
       let picked: number | null = null;
-      const give = button('Check answer', () => {
+      const give = button(t('checkAnswer'), () => {
         if (picked === null) return;
         lockAll();
         send(picked);
@@ -273,7 +281,7 @@ const draw: GuestDraw<HTMLElement> = (root: HTMLElement, eidos: GuestHost) => {
         },
       };
     }
-    const check = button(question.type === 'written' ? 'Submit' : 'Check answer', () => {
+    const check = button(question.type === 'written' ? t('submit') : t('checkAnswer'), () => {
       const answer = read();
       if (answer === null) return;
       lockAll();
@@ -305,8 +313,8 @@ const draw: GuestDraw<HTMLElement> = (root: HTMLElement, eidos: GuestHost) => {
           if (correct) label.classList.add('right');
           else if (chose) label.classList.add('wrong');
           // a true option left unchecked reads apart from one checked, since both are drawn as right
-          if (correct && !chose) label.append(el('span', { class: 'tag ok' }, 'Missed'));
-          if (!correct && chose) label.append(el('span', { class: 'tag no' }, 'Not true'));
+          if (correct && !chose) label.append(el('span', { class: 'tag ok' }, t('missed')));
+          if (!correct && chose) label.append(el('span', { class: 'tag no' }, t('notTrue')));
         }
       };
       read = () =>
@@ -318,13 +326,13 @@ const draw: GuestDraw<HTMLElement> = (root: HTMLElement, eidos: GuestHost) => {
       const id = `qg-${question.id}`;
       const field = question.type === 'short' ? el('input', { class: 'text', id, type: 'text', autocomplete: 'off', maxlength: '2000' }) : el('textarea', { id, maxlength: '10000' });
       controls.push(field);
-      form.append(el('label', { class: 'field', for: id }, question.type === 'short' ? 'Your answer' : 'Your answer, in your own words'), field, el('div', { class: 'gap' }));
+      form.append(el('label', { class: 'field', for: id }, question.type === 'short' ? t('yourAnswer') : t('yourAnswerWritten')), field, el('div', { class: 'gap' }));
       if (field instanceof HTMLInputElement) field.addEventListener('keydown', (event) => event.key === 'Enter' && !check.disabled && check.click());
       read = () => (field.value.trim() === '' ? null : field.value.trim());
       if (question.type === 'short') mark = (_said, right) => right !== null && field.classList.add(right ? 'right' : 'wrong');
     } else if (question.type === 'order') {
       const items = [...question.items];
-      const list = el('ol', { style: 'list-style:none;margin:0;padding:0', 'aria-label': 'Items, in the order you put them' });
+      const list = el('ol', { style: 'list-style:none;margin:0;padding:0', 'aria-label': t('orderList') });
       // the item being dragged, drawn lifted
       let held: string | null = null;
       // the items in their right order, once the answer is checked
@@ -334,8 +342,8 @@ const draw: GuestDraw<HTMLElement> = (root: HTMLElement, eidos: GuestHost) => {
           ...items.map((item, index) => {
             const up = button('↑', () => move(index, -1), 'small');
             const down = button('↓', () => move(index, 1), 'small');
-            up.setAttribute('aria-label', `Move ${item} up`);
-            down.setAttribute('aria-label', `Move ${item} down`);
+            up.setAttribute('aria-label', t('moveUp', { item }));
+            down.setAttribute('aria-label', t('moveDown', { item }));
             up.disabled = index === 0 || check.disabled;
             down.disabled = index === items.length - 1 || check.disabled;
             if (rightOrder) {
@@ -345,7 +353,7 @@ const draw: GuestDraw<HTMLElement> = (root: HTMLElement, eidos: GuestHost) => {
                 'li',
                 { class: `row ${placed ? 'right' : 'wrong'}` },
                 el('span', {}, `${index + 1} · ${item}`),
-                el('span', { class: `tag ${placed ? 'ok' : 'no'}` }, placed ? 'In place' : belongs >= 0 ? `Goes ${belongs + 1}` : 'Not in place'),
+                el('span', { class: `tag ${placed ? 'ok' : 'no'}` }, placed ? t('inPlace') : belongs >= 0 ? t('goes', { at: belongs + 1 }) : t('notInPlace')),
               );
             }
             if (check.disabled) return el('li', { class: 'row' }, el('span', {}, `${index + 1} · ${item}`), up, down);
@@ -382,7 +390,7 @@ const draw: GuestDraw<HTMLElement> = (root: HTMLElement, eidos: GuestHost) => {
         list.querySelectorAll<HTMLButtonElement>('button')[index * 2 + by * 2 + (by > 0 ? 1 : 0)]?.focus();
       };
       paint();
-      form.append(list, el('p', { class: 'faint' }, 'Drag each one into place, or move it with the arrows.'), el('div', { class: 'gap' }));
+      form.append(list, el('p', { class: 'faint' }, t('orderHint')), el('div', { class: 'gap' }));
       read = () => [...items];
       repaint = paint;
       mark = (said) => {
@@ -394,7 +402,7 @@ const draw: GuestDraw<HTMLElement> = (root: HTMLElement, eidos: GuestHost) => {
       const selects: HTMLSelectElement[] = [];
       question.lefts.forEach((left, index) => {
         const id = `qg-${question.id}-${index}`;
-        const select = el('select', { id }, el('option', { value: '' }, 'Choose…'), ...question.rights.map((right) => el('option', { value: right }, right)));
+        const select = el('select', { id }, el('option', { value: '' }, t('choose')), ...question.rights.map((right) => el('option', { value: right }, right)));
         selects.push(select);
         controls.push(select);
         form.append(el('div', { class: 'pair' }, el('label', { for: id }, el('span', {}, left)), select));
@@ -406,7 +414,7 @@ const draw: GuestDraw<HTMLElement> = (root: HTMLElement, eidos: GuestHost) => {
           const wanted = String(key[index] ?? '');
           const placed = select.value === wanted;
           select.classList.add(placed ? 'right' : 'wrong');
-          if (!placed) select.after(el('span', { class: 'says' }, `Answer: ${wanted}`));
+          if (!placed) select.after(el('span', { class: 'says' }, t('answerIs', { answer: wanted })));
         });
       };
       read = () => (selects.some((select) => select.value === '') ? null : selects.map((select) => select.value));
@@ -434,11 +442,11 @@ const draw: GuestDraw<HTMLElement> = (root: HTMLElement, eidos: GuestHost) => {
     feedback: HTMLElement,
     after: HTMLElement,
   ): Promise<void> {
-    feedback.replaceChildren(el('p', { class: 'faint' }, 'Checking…'));
+    feedback.replaceChildren(el('p', { class: 'faint' }, t('checking')));
     const result = await eidos.check(question.id, answer);
     if (!result.ok) {
       answering.unlock();
-      feedback.replaceChildren(el('div', { class: 'feedback problem', role: 'alert' }, problemOf(result)));
+      feedback.replaceChildren(el('div', { class: 'feedback problem', role: 'alert' }, problemOf(result, t)));
       return;
     }
     const shown = isShown(result.shown) ? result.shown : null;
@@ -447,7 +455,7 @@ const draw: GuestDraw<HTMLElement> = (root: HTMLElement, eidos: GuestHost) => {
     checked.push({ question, answer, right, shown });
     feedback.replaceChildren(feedbackOf(question, right, shown));
     const last = at === order.length - 1;
-    const next = button(last ? 'See your result' : 'Next question', () => {
+    const next = button(last ? t('seeResult') : t('nextQuestion'), () => {
       if (last) void finish();
       else {
         at += 1;
@@ -461,12 +469,12 @@ const draw: GuestDraw<HTMLElement> = (root: HTMLElement, eidos: GuestHost) => {
   function feedbackOf(question: GuestQuestion, right: boolean | null, shown: Shown | null): HTMLElement {
     const box = el('div', { class: `feedback ${right === true ? '' : right === false ? 'wrong' : 'wait'}` });
     if (question.type === 'written') {
-      box.append(el('b', {}, 'Sent to the team to grade. '));
-      if (shown?.model) box.append(el('span', {}, `A model answer: ${shown.model}`));
-      if (shown?.covers) box.append(el('span', { class: 'reference' }, `A full answer covers: ${shown.covers}`));
+      box.append(el('b', {}, t('sentToGrade')));
+      if (shown?.model) box.append(el('span', {}, t('modelAnswer', { answer: shown.model })));
+      if (shown?.covers) box.append(el('span', { class: 'reference' }, t('fullAnswerCovers', { covers: shown.covers })));
     } else {
-      box.append(el('b', {}, right ? 'Correct. ' : 'Not quite. '));
-      if (!right && shown?.right) box.append(el('span', {}, `The answer: ${shown.right}. `));
+      box.append(el('b', {}, right ? t('correct') : t('notQuite')));
+      if (!right && shown?.right) box.append(el('span', {}, t('theAnswer', { answer: shown.right })));
       if (shown?.why) box.append(el('span', {}, shown.why));
     }
     const reference = shown?.reference;
@@ -478,16 +486,16 @@ const draw: GuestDraw<HTMLElement> = (root: HTMLElement, eidos: GuestHost) => {
 
   async function finish(): Promise<void> {
     stage = 'result';
-    const sending = el('p', { class: 'muted', role: 'status' }, 'Sending your answers…');
+    const sending = el('p', { class: 'muted', role: 'status' }, t('sending'));
     show(el('h1', { tabindex: '-1', 'data-focus': '' }, copy!.title), sending);
     const answers: Record<string, Answer> = {};
     for (const held of checked) answers[held.question.id] = held.answer;
     const result = await eidos.submit({ quiz: copy!.quiz, name, answers });
     if (!result.ok) {
       show(
-        el('h1', { tabindex: '-1', 'data-focus': '' }, 'Not sent yet'),
-        el('div', { class: 'feedback problem', role: 'alert' }, `${problemOf(result)} Your answers are still here.`),
-        button('Send again', () => void finish()),
+        el('h1', { tabindex: '-1', 'data-focus': '' }, t('notSent')),
+        el('div', { class: 'feedback problem', role: 'alert' }, t('stillHere', { problem: problemOf(result, t) })),
+        button(t('sendAgain'), () => void finish()),
       );
       return;
     }
@@ -496,26 +504,26 @@ const draw: GuestDraw<HTMLElement> = (root: HTMLElement, eidos: GuestHost) => {
     const of = order.reduce((total, question) => total + question.points, 0);
     const waiting = checked.filter((held) => held.right === null).length;
     show(
-      waiting > 0 ? el('p', { class: 'center' }, el('span', { class: 'pill' }, `${waiting} ${waiting === 1 ? 'answer' : 'answers'} waiting for a grade`)) : null,
-      el('p', { class: 'score', tabindex: '-1', 'data-focus': '', 'aria-label': `${points} of ${of} points` }, el('b', {}, String(points)), el('span', {}, `of ${of}`)),
-      el('p', { class: 'center' }, waiting > 0 ? `Points so far${name ? `, ${name}` : ''}` : `${of > 0 ? Math.round((points / of) * 100) : 0}%${name ? `, ${name}` : ''}`),
-      waiting > 0 ? el('p', { class: 'center faint' }, 'The team grades your written answers.') : null,
+      waiting > 0 ? el('p', { class: 'center' }, el('span', { class: 'pill' }, waiting === 1 ? t('waitingOne') : t('waitingOther', { count: waiting }))) : null,
+      el('p', { class: 'score', tabindex: '-1', 'data-focus': '', 'aria-label': t('scoreLabel', { points, of }) }, el('b', {}, String(points)), el('span', {}, t('scoreOf', { of }))),
+      el('p', { class: 'center' }, waiting > 0 ? (name ? t('soFarNamed', { name }) : t('soFar')) : (name ? t('percentNamed', { percent: percent(points, of), name }) : t('percent', { percent: percent(points, of) }))),
+      waiting > 0 ? el('p', { class: 'center faint' }, t('teamGrades')) : null,
       el(
         'ol',
         { class: 'review' },
         ...checked.map((held) => {
           const mark =
             held.right === true
-              ? el('span', { class: 'mark ok', 'aria-label': 'Right' }, '✓')
+              ? el('span', { class: 'mark ok', 'aria-label': t('right') }, '✓')
               : held.right === false
-                ? el('span', { class: 'mark no', 'aria-label': 'Wrong' }, '✗')
-                : el('span', { class: 'mark waits', 'aria-label': 'Waiting for a grade' }, '…');
-          const earned = held.right === null ? `Waiting for a grade · of ${held.question.points}` : `${held.right ? held.question.points : 0} of ${held.question.points}`;
-          const answerLine = held.right === false && held.shown?.right ? `Answer: ${held.shown.right} · ${earned}` : earned;
+                ? el('span', { class: 'mark no', 'aria-label': t('wrong') }, '✗')
+                : el('span', { class: 'mark waits', 'aria-label': t('waitingGrade') }, '…');
+          const earned = held.right === null ? t('earnedWaiting', { of: held.question.points }) : t('earned', { points: held.right ? held.question.points : 0, of: held.question.points });
+          const answerLine = held.right === false && held.shown?.right ? t('answerEarned', { answer: held.shown.right, earned }) : earned;
           return el('li', {}, mark, el('b', {}, held.question.prompt), el('div', { class: 'detail' }, answerLine));
         }),
       ),
-      button('Take it again', () => start(), 'quiet'),
+      button(t('takeAgain'), () => start(), 'quiet'),
     );
   }
 
