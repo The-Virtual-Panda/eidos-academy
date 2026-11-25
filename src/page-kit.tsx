@@ -315,11 +315,11 @@ export function formatDate(iso: string | null | undefined): string {
   return Number.isNaN(date.getTime()) ? iso : date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
-// Change between two fractions, in percentage points, as the Academy says it.
-export function Delta({ change, suffix }: { change: number | null | undefined; suffix: string }): JSX.Element | null {
+// Change between two fractions, in percentage points, as the Academy says it; `same` is said when there is none.
+export function Delta({ change, suffix, same }: { change: number | null | undefined; suffix: string; same: string }): JSX.Element | null {
   if (change === null || change === undefined) return null;
   const points = Math.round(change * 100);
-  if (points === 0) return <span>Same as {suffix.replace(/^vs /, '')}</span>;
+  if (points === 0) return <span>{same}</span>;
   return (
     <span>
       <span className={points > 0 ? 'qz-up' : 'qz-down'}>
@@ -443,8 +443,9 @@ export function ContextMenu({ x, y, items, onClose }: { x: number; y: number; it
 }
 
 export function LaptopMark(): JSX.Element {
+  const { t } = usePluginHost();
   return (
-    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" role="img" aria-label="Local">
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" role="img" aria-label={t('local')}>
       <path d="M5 6h14v10H5zM3 19h18" />
     </svg>
   );
@@ -538,14 +539,15 @@ function usePlainDraft(options: DraftOptions, failed: string): Dirty {
 
 // Discard and Save for a draft: the kit's SaveActions on 0.26.0, the plugin's own two buttons on an older host
 export function DraftActions({ draft, canSave = true }: { draft: Dirty; canSave?: boolean }): JSX.Element {
+  const { t } = usePluginHost();
   if (KIT_DRAFTS) return <SaveActions draft={draft} />;
   return (
     <span className="qz-edit-tools">
       <Button disabled={!draft.dirty || draft.saving} onClick={draft.discard}>
-        Discard
+        {t('discard')}
       </Button>
       <Button variant="primary" disabled={!draft.dirty || !canSave || draft.saving} onClick={() => void draft.save()}>
-        Save
+        {t('save')}
       </Button>
     </span>
   );
